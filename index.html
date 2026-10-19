@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data: mediastream:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#0b1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SecureChat">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>SecureChat</title>
+<style>
+:root{--bg:#0b1220;--panel:#111a2e;--line:#1e2a44;--text:#e8eefc;--dim:#8fa0c4;--acc:#3b82f6;--acc2:#22c55e;--red:#ef4444;--me:#1d4ed8;--them:#1b2640}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+button,input,textarea,select{font:inherit;color:inherit}
+button{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{background:var(--red);border-color:var(--red);color:#fff}
+button.ic{border:none;background:transparent;font-size:20px;padding:8px 10px}
+input,textarea,select{background:#0d1526;border:1px solid var(--line);border-radius:12px;padding:10px 12px;width:100%}
+textarea{resize:none}
+.hidden{display:none!important}
+.screen{position:fixed;inset:0;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+header{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:18px;margin:0;flex:1}
+header .sub{font-size:12px;color:var(--dim)}
+.grow{flex:1;min-width:0}
+.list{flex:1;overflow:auto}
+.row{display:flex;gap:12px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.av{width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#7c3aed);display:grid;place-items:center;font-weight:700;flex:none}
+.row .n{font-weight:600}.row .l{font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:10px;height:10px;border-radius:50%;background:#475569;flex:none}.dot.on{background:var(--acc2)}
+.badge{background:var(--acc);border-radius:999px;font-size:12px;padding:2px 8px}
+.empty{padding:40px 24px;text-align:center;color:var(--dim)}
+#msgs{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
+.b{max-width:80%;padding:8px 10px;border-radius:14px;word-break:break-word;white-space:pre-wrap}
+.b.me{align-self:flex-end;background:var(--me);border-bottom-right-radius:4px}
+.b.them{align-self:flex-start;background:var(--them);border-bottom-left-radius:4px}
+.b img{max-width:100%;border-radius:10px;display:block}.b audio{max-width:100%}.b a{color:#93c5fd}
+.b .meta{font-size:11px;color:#b6c4e6;opacity:.8;text-align:right;margin-top:2px}
+.b .meta button{border:none;background:none;padding:0 0 0 6px;font-size:11px;opacity:.7}
+.sys{align-self:center;font-size:12px;color:var(--dim);background:var(--panel);padding:4px 10px;border-radius:999px}
+#typing{font-size:12px;color:var(--dim);padding:0 14px;height:16px}
+.composer{display:flex;gap:6px;align-items:flex-end;padding:8px;border-top:1px solid var(--line);background:var(--panel)}
+.composer textarea{max-height:120px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;justify-content:center;z-index:20}
+.sheet{background:var(--panel);width:100%;max-width:520px;max-height:92%;overflow:auto;border-radius:20px 20px 0 0;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px}
+.sheet h2{margin:0;font-size:18px}.sheet p{margin:0;color:var(--dim);font-size:14px}
+.code{font:12px/1.3 ui-monospace,monospace;word-break:break-all;background:#0d1526;border:1px solid var(--line);border-radius:10px;padding:8px;max-height:90px;overflow:auto;user-select:all}
+.qr{background:#fff;border-radius:12px;padding:10px;align-self:center;width:230px;height:230px}.qr svg,.qr img{width:100%;height:100%}
+.btns{display:flex;gap:8px;flex-wrap:wrap}.btns>*{flex:1}
+.safety{font:20px/1.5 ui-monospace,monospace;text-align:center;letter-spacing:1px}
+#call{background:#000;z-index:30}
+#rv{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+#lv{position:absolute;right:12px;top:calc(12px + env(safe-area-inset-top));width:30%;max-width:140px;aspect-ratio:3/4;object-fit:cover;border-radius:12px;background:#111;border:1px solid #333;transform:scaleX(-1)}
+#cinfo{position:absolute;top:30%;left:0;right:0;text-align:center}
+#cinfo .av{width:96px;height:96px;font-size:40px;margin:0 auto 12px}
+#cbar{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:14px;padding:20px 12px calc(24px + env(safe-area-inset-bottom))}
+#cbar button{width:58px;height:58px;border-radius:50%;font-size:22px;padding:0;background:#243049}
+#cbar button.off{background:#fff;color:#000}#cbar .end{background:var(--red)}#cbar .ok{background:var(--acc2)}
+.toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#1f2b47;border:1px solid var(--line);padding:8px 14px;border-radius:999px;z-index:50;font-size:14px}
+#lock{z-index:60;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center}
+#lock>*{max-width:340px;width:100%}
+.err{color:var(--red);font-size:14px;min-height:18px}
+video#scanv{width:100%;border-radius:12px;background:#000;max-height:260px;object-fit:cover}
+</style>
+</head>
+<body>
+
+<div id="lock" class="screen">
+  <div class="av" style="width:72px;height:72px;font-size:32px;margin:0 auto">🔒</div>
+  <h1 id="lockTitle" style="margin:0">SecureChat</h1>
+  <p id="lockHelp" style="margin:0;color:var(--dim)"></p>
+  <input id="pin" type="password" autocomplete="off" placeholder="Passphrase">
+  <input id="pin2" type="password" autocomplete="off" placeholder="Repeat passphrase" class="hidden">
+  <div class="err" id="lockErr"></div>
+  <button class="pri" id="lockBtn">Unlock</button>
+</div>
+
+<div id="app" class="screen hidden">
+  <div id="vList" class="screen" style="position:absolute">
+    <header><h1>SecureChat <span class="sub">end‑to‑end</span></h1>
+      <button class="ic" id="newChat" title="New chat">＋</button>
+      <button class="ic" id="openSettings" title="Settings">⚙️</button></header>
+    <div class="list" id="chats"></div>
+  </div>
+
+  <div id="vChat" class="screen hidden" style="position:absolute">
+    <header>
+      <button class="ic" id="back">←</button>
+      <div class="av" id="cav" style="width:36px;height:36px"></div>
+      <div class="grow"><div id="cname" style="font-weight:600"></div><div class="sub" id="cstat"></div></div>
+      <button class="ic" id="aCall" title="Audio call">📞</button>
+      <button class="ic" id="vCall" title="Video call">🎥</button>
+      <button class="ic" id="cMenu">⋮</button>
+    </header>
+    <div id="msgs"></div>
+    <div id="typing"></div>
+    <div class="composer">
+      <button class="ic" id="attach">📎</button>
+      <input type="file" id="file" class="hidden">
+      <textarea id="txt" rows="1" placeholder="Message"></textarea>
+      <button class="ic" id="mic">🎙️</button>
+      <button class="pri" id="send">➤</button>
+    </div>
+  </div>
+</div>
+
+<div id="call" class="screen hidden">
+  <video id="rv" autoplay playsinline></video>
+  <div id="cinfo"><div class="av" id="cav2"></div><div id="cn2" style="font-size:22px;font-weight:600"></div><div id="cs2" style="color:#aab"></div></div>
+  <video id="lv" autoplay playsinline muted class="hidden"></video>
+  <div id="cbar">
+    <button id="bAcc" class="ok hidden">📞</button>
+    <button id="bMute">🎤</button>
+    <button id="bCam">📷</button>
+    <button id="bFlip">🔄</button>
+    <button id="bEnd" class="end">⏹</button>
+  </div>
+</div>
+
+<div id="modal" class="modal hidden"><div class="sheet" id="sheet"></div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
