@@ -117,7 +117,7 @@ function lockNow() {
   initLock();
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && KEY) lockTimer = setTimeout(lockNow, 60000);
+  if (document.hidden && KEY) lockTimer = setTimeout(lockNow, pc ? 10 * 60000 : 60000);
   else clearTimeout(lockTimer);
 });
 
@@ -184,7 +184,7 @@ async function deleteMsg(id, remote) {
 function openSheet(build) {
   const sh = $('#sheet'); sh.innerHTML = ''; build(sh); $('#modal').classList.remove('hidden');
 }
-const closeSheet = () => { $('#modal').classList.add('hidden'); stopScan(); };
+const closeSheet = () => { $('#modal').classList.add('hidden'); stopScan(); stopRelay(); };
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeSheet(); });
 function el(tag, props = {}, ...kids) {
   const e = document.createElement(tag); Object.assign(e, props);
@@ -272,7 +272,8 @@ function newPC() {
   closePeer();
   pc = new RTCPeerConnection({ iceServers: settings.stun ? [{ urls: 'stun:stun.l.google.com:19302' }] : [] });
   pc.onconnectionstatechange = () => {
-    if (['failed', 'closed'].includes(pc.connectionState)) peerLost();
+    if (pc.connectionState === 'failed' && !conn) { toast('Could not connect. Try both phones on the same Wi‑Fi, then Start again.'); closePeer(); }
+    else if (['failed', 'closed'].includes(pc.connectionState)) peerLost();
     else if (pc.connectionState === 'disconnected') $('#cstat').textContent = 'reconnecting…';
     else updateStatus();
   };
@@ -310,6 +311,7 @@ function setupDC(cid) {
   };
   dc.onclose = () => { if (conn) peerLost(); };
   dc.onmessage = e => onWire(JSON.parse(e.data));
+  if (dc.readyState === 'open') dc.onopen();
 }
 const sendRaw = o => { if (dc && dc.readyState === 'open') dc.send(JSON.stringify(o)); };
 async function wire(m) {
@@ -380,13 +382,115 @@ function connectFlow() {
   if (!curChat) return;
   const cid = curChat;
   openSheet(sh => {
-    sh.append(el('h2', { textContent: 'Connect securely' }),
-      el('p', { textContent: 'No server is involved. One of you taps “Start”, the other taps “Join”. You then swap two short codes by sending them to each other in any other app (Copy or Share). Each code is only a one-time connection offer.' }),
+    sh.append(el('h2', { textContent: 'Connect (easy way)' }),
+      el('p', { textContent: 'Both of you open this app. One taps “Create room code” and tells the code to the other (message, call, anything). The other taps “Join with code” and types it. That is all.' }),
+      el('button', { className: 'pri', textContent: '1. Create room code', onclick: () => hostEasy(cid) }),
+      el('button', { className: 'pri', textContent: '2. Join with code', onclick: () => joinAsk(cid) }),
+      el('p', { textContent: 'Problems with the relay? Manual way:' }),
       el('div', { className: 'btns' },
-        el('button', { className: 'pri', textContent: 'Start (I invite)', onclick: () => hostFlow(cid) }),
-        el('button', { className: 'pri', textContent: 'Join (I was invited)', onclick: () => joinFlow(cid) })));
+        el('button', { textContent: 'Manual: Start', onclick: () => hostFlow(cid) }),
+        el('button', { textContent: 'Manual: Join', onclick: () => joinFlow(cid) })));
   });
 }
+
+/* ---------- easy connect: room code via a public relay (ntfy.sh) ----------
+   The relay only ever sees an AES-GCM encrypted blob. The key comes from the room code,
+   which you tell your contact yourself. Messages and calls never go through the relay. */
+const RELAY = 'https://ntfy.sh/';
+const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const genCode = () => { const b = crypto.getRandomValues(new Uint8Array(10)); const t = [...b].map(x => ALPHA[x & 31]).join(''); return t.slice(0, 5) + '-' + t.slice(5); };
+const normCode = c => (c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+async function roomKeys(code) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(normCode(code)), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('securechat-room-v1'), iterations: 200000, hash: 'SHA-256' }, base, 384));
+  const topic = 'sc' + [...bits.slice(0, 16)].map(x => x.toString(16).padStart(2, '0')).join('');
+  const key = await crypto.subtle.importKey('raw', bits.slice(16, 48), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return { topic, key };
+}
+async function roomSeal(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj))));
+  const o = new Uint8Array(12 + ct.length); o.set(iv); o.set(ct, 12); return b64u(o);
+}
+async function roomOpen(key, str) {
+  const b = unb64u(str);
+  return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, key, b.slice(12))));
+}
+let relayES = null, relayTO = null;
+function stopRelay() { if (relayES) { relayES.close(); relayES = null; } clearTimeout(relayTO); }
+function listenRoom(topic, onmsg) {
+  stopRelay();
+  const es = new EventSource(RELAY + topic + '/sse?since=all'); relayES = es;
+  es.onmessage = ev => { try { const j = JSON.parse(ev.data); if (j.event === 'message') onmsg(j.message); } catch {} };
+  relayTO = setTimeout(() => { if (relayES === es) { stopRelay(); setRoomStatus('Room expired. Close and create a new one.'); } }, 10 * 60000);
+}
+async function postRoom(topic, text) {
+  const r = await fetch(RELAY + topic, { method: 'POST', body: text });
+  if (!r.ok) throw new Error('Relay error ' + r.status);
+}
+const setRoomStatus = t => { const e = $('#roomStatus'); if (e) e.textContent = t; };
+function showRoomSheet(code) {
+  openSheet(sh => {
+    const share = 'SecureChat room code: ' + code + '\nOpen: ' + location.origin + location.pathname;
+    sh.append(el('h2', { textContent: 'Your room code' }),
+      el('div', { style: 'font:700 32px ui-monospace,monospace;letter-spacing:3px;text-align:center;padding:10px;user-select:all', textContent: code }),
+      el('p', { textContent: 'Tell this code to your contact. They open SecureChat, add you, tap Connect › “Join with code” and type it. Keep this app open until it says connected.' }),
+      el('div', { className: 'btns' },
+        el('button', { textContent: 'Copy', onclick: async () => { try { await navigator.clipboard.writeText(share); toast('Copied'); } catch { toast('Copy failed'); } } }),
+        navigator.share ? el('button', { textContent: 'Share…', onclick: () => navigator.share({ text: share }).catch(() => {}) }) : document.createTextNode('')),
+      el('p', { id: 'roomStatus', textContent: 'Preparing…' }));
+  });
+}
+async function hostEasy(cid) {
+  const code = genCode(); showRoomSheet(code);
+  try {
+    const { topic, key } = await roomKeys(code);
+    newPC(); polite = false; const myPc = pc;
+    dc = pc.createDataChannel('chat'); setupDC(cid);
+    await pc.setLocalDescription(await pc.createOffer()); await gathered();
+    const sdp = await pack(pc.localDescription);
+    await postRoom(topic, JSON.stringify({ t: 'o', d: await roomSeal(key, { sdp, ts: Date.now() }) }));
+    setRoomStatus('Waiting for your contact to join…');
+    let done = false;
+    listenRoom(topic, async m => {
+      if (done || pc !== myPc) return;
+      try {
+        const j = JSON.parse(m); if (j.t !== 'a') return;
+        const o = await roomOpen(key, j.d); if (Date.now() - o.ts > 15 * 60000) return;
+        done = true; stopRelay(); setRoomStatus('Connecting…');
+        await pc.setRemoteDescription(await unpack(o.sdp));
+      } catch (e) { console.warn(e); }
+    });
+  } catch (e) { closePeer(); setRoomStatus('Cannot reach the relay server. Check your internet, or use the manual way.'); }
+}
+function joinAsk(cid) {
+  openSheet(sh => {
+    const inp = el('input', { placeholder: 'XXXXX-XXXXX', autocapitalize: 'characters', autocomplete: 'off', style: 'font:700 24px ui-monospace,monospace;text-align:center;letter-spacing:2px;text-transform:uppercase' });
+    sh.append(el('h2', { textContent: 'Join with code' }), el('p', { textContent: 'Type the room code your contact gave you.' }), inp,
+      el('button', { className: 'pri', textContent: 'Join', onclick: () => joinEasy(cid, inp.value) }));
+    setTimeout(() => inp.focus(), 50);
+  });
+}
+async function joinEasy(cid, codeText) {
+  if (normCode(codeText).length !== 10) return toast('The code has 10 letters/numbers');
+  openSheet(sh => sh.append(el('h2', { textContent: 'Joining…' }), el('p', { id: 'roomStatus', textContent: 'Looking for the room… keep this app open.' })));
+  try {
+    const { topic, key } = await roomKeys(codeText); let done = false;
+    listenRoom(topic, async m => {
+      if (done) return;
+      try {
+        const j = JSON.parse(m); if (j.t !== 'o') return;
+        const o = await roomOpen(key, j.d); if (Date.now() - o.ts > 15 * 60000) return;
+        done = true; setRoomStatus('Found. Connecting…');
+        newPC(); polite = true; pc.ondatachannel = e => { dc = e.channel; setupDC(cid); };
+        await pc.setRemoteDescription(await unpack(o.sdp)); await pc.setLocalDescription(await pc.createAnswer()); await gathered();
+        await postRoom(topic, JSON.stringify({ t: 'a', d: await roomSeal(key, { sdp: await pack(pc.localDescription), ts: Date.now() }) }));
+        stopRelay(); setRoomStatus('Connecting… keep this app open.');
+      } catch (e) { setRoomStatus('Problem: ' + (e.message || e) + '. Close and try again.'); }
+    });
+  } catch (e) { setRoomStatus('Cannot reach the relay server. Check your internet.'); }
+}
+
 async function hostFlow(cid) {
   openSheet(sh => sh.append(el('h2', { textContent: 'Preparing invite…' })));
   newPC(); polite = false;
@@ -400,8 +504,10 @@ async function hostFlow(cid) {
       el('h2', { textContent: '2. Enter their reply' }), ta, vid,
       el('div', { className: 'btns' },
         el('button', { className: 'pri', textContent: 'Connect', onclick: async () => {
-          try { stopScan(); await pc.setRemoteDescription(await unpack(ta.value)); toast('Connecting…'); }
-          catch (e) { toast(e.message || 'Invalid code'); }
+          try {
+            stopScan(); if (!pc) return toast('Session expired. Close this and tap Start again.');
+            await pc.setRemoteDescription(await unpack(ta.value)); toast('Connecting… keep this app open');
+          } catch (e) { toast(e.message || 'Invalid code'); }
         } })));
   });
 }
@@ -418,7 +524,7 @@ async function joinFlow(cid) {
             await pc.setRemoteDescription(offer); await pc.setLocalDescription(await pc.createAnswer()); await gathered();
             const code = await pack(pc.localDescription);
             openSheet(s2 => s2.append(el('h2', { textContent: 'Show this reply to your contact' }),
-              el('p', { textContent: 'Waiting for them to enter it… this closes automatically when connected.' }), codeBlock(code)));
+              el('p', { textContent: 'Copy this code and send it to your contact. Then come BACK to this app and keep it open. It connects automatically when they enter it.' }), codeBlock(code)));
           } catch (e) { toast(e.message || 'Invalid code'); }
         } })));
   });
