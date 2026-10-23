@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data: mediastream:; connect-src 'self' https://ntfy.sh; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#ededed">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SecureChat">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>SecureChat</title>
+<style>
+:root{--bg:#ededed;--panel:#f7f7f7;--line:#d9d9d9;--text:#111;--dim:#8a8a8a;--acc:#07c160;--red:#fa5151;--me:#95ec69;--metext:#111;--them:#fff;--input:#fff;--ease:cubic-bezier(.32,.72,0,1);--spring:cubic-bezier(.2,.9,.3,1.25)}
+@media (prefers-color-scheme:dark){:root{--bg:#111;--panel:#1c1c1c;--line:#2c2c2c;--text:#ededed;--dim:#8a8a8a;--me:#3eb575;--metext:#fff;--them:#2c2c2c;--input:#2a2a2a}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,system-ui,sans-serif;overscroll-behavior:none}
+button,input,textarea,select{font:inherit;color:inherit}
+button{background:var(--them);border:none;border-radius:10px;padding:12px 14px;cursor:pointer;transition:transform .15s var(--ease),opacity .15s,background .2s}
+button:active{transform:scale(.95);opacity:.8}
+button:disabled{opacity:.35}
+button.pri{background:var(--acc);color:#fff;font-weight:600}
+button.danger{background:var(--red);color:#fff}
+button.ic{background:transparent;font-size:22px;padding:8px 10px;border-radius:50%}
+input,textarea,select{background:var(--input);border:1px solid var(--line);border-radius:10px;padding:11px 12px;width:100%;outline:none;transition:border-color .2s}
+input:focus,textarea:focus{border-color:var(--acc)}
+textarea{resize:none}
+.hidden{display:none!important}
+.screen{position:fixed;inset:0;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+#app{position:fixed;inset:0;overflow:hidden;background:var(--bg)}
+.view{position:absolute;inset:0;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);background:var(--bg);transition:transform .4s var(--ease),opacity .4s var(--ease);will-change:transform}
+#vChat{transform:translateX(100%);box-shadow:-8px 0 24px rgba(0,0,0,.12)}
+body.chat-open #vChat{transform:none}
+body.chat-open #vList{transform:translateX(-28%);opacity:.55}
+body.dragging .view{transition:none}
+header{display:flex;align-items:center;gap:4px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel);min-height:52px}
+header h1{font-size:18px;margin:0;flex:1;font-weight:600}
+header .sub{font-size:12px;color:var(--dim);font-weight:400}
+.grow{flex:1;min-width:0}
+.list{flex:1;overflow:auto;background:var(--panel)}
+.row{display:flex;gap:12px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .15s;animation:rowin .45s var(--ease) both}
+.row:active{background:var(--line)}
+@keyframes rowin{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.av{width:44px;height:44px;border-radius:10px;display:grid;place-items:center;font-weight:700;flex:none;color:#fff;background:#576b95}
+.row .n{font-weight:600}.row .l{font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:10px;height:10px;border-radius:50%;background:#c4c4c4;flex:none;transition:background .3s,transform .3s}.dot.on{background:var(--acc);transform:scale(1.2)}
+.badge{background:var(--red);color:#fff;border-radius:999px;font-size:12px;padding:1px 7px;min-width:20px;text-align:center}
+.empty{padding:48px 28px;text-align:center;color:var(--dim)}
+#msgs{flex:1;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth}
+.b{position:relative;max-width:78%;padding:9px 12px;border-radius:8px;word-break:break-word;white-space:pre-wrap;box-shadow:0 1px 1px rgba(0,0,0,.05)}
+.b.me{align-self:flex-end;background:var(--me);color:var(--metext)}
+.b.them{align-self:flex-start;background:var(--them)}
+.b.me::after,.b.them::after{content:"";position:absolute;top:12px;border:6px solid transparent}
+.b.me::after{right:-10px;border-left-color:var(--me)}
+.b.them::after{left:-10px;border-right-color:var(--them)}
+.b.pop{animation:pop .42s var(--spring) both}
+.b.me.pop{transform-origin:100% 100%}.b.them.pop{transform-origin:0 100%}
+@keyframes pop{from{opacity:0;transform:scale(.5) translateY(14px)}to{opacity:1;transform:none}}
+.b img{max-width:100%;border-radius:6px;display:block}.b audio{max-width:100%}.b a{color:#576b95}
+.b .meta{font-size:11px;opacity:.55;text-align:right;margin-top:3px}
+.b .meta button{background:none;padding:0 0 0 8px;font-size:11px;opacity:.7;border-radius:0}
+#typing{font-size:12px;color:var(--dim);padding:0 16px;height:16px}
+.composer{display:flex;gap:6px;align-items:flex-end;padding:8px;border-top:1px solid var(--line);background:var(--panel)}
+.composer textarea{max-height:120px;border-radius:8px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:flex-end;justify-content:center;z-index:20;opacity:0;visibility:hidden;transition:opacity .3s var(--ease),visibility 0s .4s}
+.modal.show{opacity:1;visibility:visible;transition:opacity .3s var(--ease),visibility 0s}
+.sheet{background:var(--panel);width:100%;max-width:520px;max-height:92%;overflow:auto;border-radius:16px 16px 0 0;padding:18px 16px;padding-bottom:calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px;transform:translateY(100%);transition:transform .45s var(--ease)}
+.modal.show .sheet{transform:none}
+.sheet h2{margin:0;font-size:18px}.sheet p{margin:0;color:var(--dim);font-size:14px}
+.sheet label{display:flex;gap:10px;align-items:flex-start;font-size:14px}.sheet label input{width:auto;margin-top:3px}
+.sheet button{background:var(--them);border:1px solid var(--line)}.sheet button.pri{border:none}.sheet button.danger{border:none}
+.btns{display:flex;gap:8px;flex-wrap:wrap}.btns>*{flex:1}
+.bigcode{font:700 34px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:4px;text-align:center;padding:12px;user-select:all;color:var(--acc)}
+.spin{width:22px;height:22px;border:3px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.safety{font:20px/1.5 ui-monospace,monospace;text-align:center;letter-spacing:1px}
+#call{background:#111;z-index:30;color:#fff;opacity:0;transform:scale(1.06);visibility:hidden;transition:opacity .35s var(--ease),transform .45s var(--ease),visibility 0s .45s}
+#call.on{opacity:1;transform:none;visibility:visible;transition:opacity .35s var(--ease),transform .45s var(--ease),visibility 0s}
+#rv{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+#lv{position:absolute;right:12px;top:calc(12px + env(safe-area-inset-top));width:30%;max-width:140px;aspect-ratio:3/4;object-fit:cover;border-radius:10px;background:#222;box-shadow:0 4px 16px rgba(0,0,0,.4);transform:scaleX(-1)}
+#cinfo{position:absolute;top:28%;left:0;right:0;text-align:center}
+#cinfo .av{width:96px;height:96px;font-size:40px;margin:0 auto 14px;border-radius:18px}
+#cbar{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:16px;padding:20px 12px calc(28px + env(safe-area-inset-bottom))}
+#cbar button{width:60px;height:60px;border-radius:50%;font-size:22px;padding:0;background:rgba(255,255,255,.18);color:#fff;backdrop-filter:blur(10px)}
+#cbar button.off{background:#fff;color:#000}#cbar .end{background:var(--red)}#cbar .ok{background:var(--acc)}
+.toast{position:fixed;left:50%;top:calc(66px + env(safe-area-inset-top));transform:translateX(-50%);background:rgba(30,30,30,.92);color:#fff;padding:10px 16px;border-radius:12px;z-index:50;font-size:14px;max-width:88%;text-align:center;animation:toast .5s var(--spring) both}
+.toast.out{animation:toastout .3s var(--ease) both}
+@keyframes toast{from{opacity:0;transform:translate(-50%,-30px) scale(.9)}to{opacity:1;transform:translate(-50%,0)}}
+@keyframes toastout{to{opacity:0;transform:translate(-50%,-20px)}}
+#lock{z-index:60;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:var(--bg)}
+#lock>*{max-width:340px;width:100%}
+.err{color:var(--red);font-size:14px;min-height:18px}
+.lockico{width:76px;height:76px;border-radius:18px;background:var(--acc);display:grid;place-items:center;font-size:36px;margin:0 auto;animation:pop .6s var(--spring) both}
+</style>
+</head>
+<body>
+
+<div id="lock" class="screen">
+  <div class="lockico">🔒</div>
+  <h1 id="lockTitle" style="margin:0">SecureChat</h1>
+  <p id="lockHelp" style="margin:0;color:var(--dim)"></p>
+  <input id="uname" autocomplete="off" placeholder="Your name (your friends will see this)" class="hidden">
+  <input id="pin" type="password" autocomplete="off" placeholder="Passphrase">
+  <input id="pin2" type="password" autocomplete="off" placeholder="Repeat passphrase" class="hidden">
+  <div class="err" id="lockErr"></div>
+  <button class="pri" id="lockBtn">Unlock</button>
+</div>
+
+<div id="app" class="hidden">
+  <div id="vList" class="view">
+    <header><h1>SecureChat <span class="sub">end‑to‑end</span></h1>
+      <button class="ic" id="newChat" title="Add friend">＋</button>
+      <button class="ic" id="openSettings" title="Settings">⚙️</button></header>
+    <div class="list" id="chats"></div>
+  </div>
+
+  <div id="vChat" class="view">
+    <header>
+      <button class="ic" id="back">‹</button>
+      <div class="av" id="cav" style="width:36px;height:36px"></div>
+      <div class="grow"><div id="cname" style="font-weight:600"></div><div class="sub" id="cstat"></div></div>
+      <button class="ic" id="aCall" title="Audio call">📞</button>
+      <button class="ic" id="vCall" title="Video call">🎥</button>
+      <button class="ic" id="cMenu">⋯</button>
+    </header>
+    <div id="msgs"></div>
+    <div id="typing"></div>
+    <div class="composer">
+      <button class="ic" id="attach">📎</button>
+      <input type="file" id="file" class="hidden">
+      <input type="file" id="bfile" accept=".json,application/json" class="hidden">
+      <textarea id="txt" rows="1" placeholder="Message"></textarea>
+      <button class="ic" id="mic">🎙️</button>
+      <button class="pri" id="send">➤</button>
+    </div>
+  </div>
+</div>
+
+<div id="call" class="screen">
+  <video id="rv" autoplay playsinline></video>
+  <div id="cinfo"><div class="av" id="cav2"></div><div id="cn2" style="font-size:22px;font-weight:600"></div><div id="cs2" style="color:#bbb"></div></div>
+  <video id="lv" autoplay playsinline muted class="hidden"></video>
+  <div id="cbar">
+    <button id="bAcc" class="ok hidden">📞</button>
+    <button id="bMute">🎤</button>
+    <button id="bCam">📷</button>
+    <button id="bFlip">🔄</button>
+    <button id="bEnd" class="end">⏹</button>
+  </div>
+</div>
+
+<div id="modal" class="modal"><div class="sheet" id="sheet"></div></div>
+
+<script src="app.js"></script>
+</body>
+</html>

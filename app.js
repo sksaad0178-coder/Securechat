@@ -1,12 +1,17 @@
 'use strict';
-/* SecureChat — serverless, end-to-end encrypted P2P messenger (WebRTC).
-   - Messages/files/voice/calls travel directly between the two devices (DTLS/SRTP encrypted).
-   - Chat history is encrypted on this device with AES-GCM using a key derived from your passphrase. */
+/* SecureChat v3 — serverless end-to-end encrypted messenger (WebRTC).
+   - Messages, files, voice and calls travel directly between the two phones (DTLS / SRTP encrypted).
+   - A public relay (ntfy.sh) is used only to exchange tiny encrypted "connect" notes. It never sees content.
+   - Your friends and settings are encrypted on this phone with a key derived from your passphrase.
+   - By default, chat messages are NOT saved on the phone at all (memory only). */
 
 const $ = s => document.querySelector(s);
 const enc = new TextEncoder(), dec = new TextDecoder();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const uid = () => crypto.randomUUID();
+const b64u = u8 => btoa(String.fromCharCode(...u8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+const hex = u8 => [...u8].map(x => x.toString(16).padStart(2, '0')).join('');
 
 /* ---------- storage (IndexedDB, encrypted values) ---------- */
 const idb = new Promise((res, rej) => {
@@ -32,47 +37,56 @@ async function deriveKey(pass, salt) {
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 400000, hash: 'SHA-256' },
     base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
-async function seal(obj) {
+async function sealWith(key, obj) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, KEY, enc.encode(JSON.stringify(obj))));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj))));
   const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12); return out;
 }
-async function unseal(buf) {
+async function unsealWith(key, buf) {
   const b = new Uint8Array(buf);
-  return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, KEY, b.slice(12))));
+  return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, key, b.slice(12))));
 }
+const seal = obj => sealWith(KEY, obj), unseal = buf => unsealWith(KEY, buf);
 
 /* ---------- state ---------- */
-let contacts = [];                 // {id,name,ttl}
-let settings = { name: 'Me', stun: true };
+const DEFAULTS = () => ({ name: '', stun: true, noStore: true, lockMin: 5, myId: '' });
+let contacts = [];                 // {id,name,ttl,pid,ps}
+let settings = DEFAULTS();
 const msgsCache = {};              // cid -> [msg]
 let curChat = null;                // contact id open in UI
-let conn = null;                   // {cid, safety}
+let conn = null;                   // {cid, safety, rnd}
 let unread = {};
 const incoming = {};
 let typingTimer = null;
 
 async function loadAll() {
-  contacts = (await kvGet('contacts').then(b => b ? unseal(b) : [])) || [];
+  const list = (await kvGet('contacts').then(b => b ? unseal(b) : [])) || [];
+  contacts = list.filter(c => c.ps);               // drop half-finished pairings
   const s = await kvGet('settings').then(b => b ? unseal(b) : null);
-  if (s) settings = Object.assign(settings, s);
+  settings = Object.assign(DEFAULTS(), s || {});
+  if (!settings.myId) { settings.myId = b64u(crypto.getRandomValues(new Uint8Array(16))); await saveSettings(); }
 }
-const saveContacts = async () => kvSet('contacts', await seal(contacts));
-const saveSettings = async () => kvSet('settings', await seal(settings));
+const saveContacts = async () => { if (KEY) await kvSet('contacts', await seal(contacts.filter(c => c.ps))); };
+const saveSettings = async () => { if (KEY) await kvSet('settings', await seal(settings)); };
 async function getMsgs(cid) {
-  if (!msgsCache[cid]) { const b = await kvGet('m:' + cid); msgsCache[cid] = b ? await unseal(b) : []; }
+  if (!msgsCache[cid]) {
+    if (settings.noStore) msgsCache[cid] = [];
+    else { const b = await kvGet('m:' + cid); msgsCache[cid] = b ? await unseal(b) : []; }
+  }
   return msgsCache[cid];
 }
 const saveTimers = {};
 function saveMsgs(cid) {
+  if (settings.noStore) return;
   clearTimeout(saveTimers[cid]);
-  saveTimers[cid] = setTimeout(async () => kvSet('m:' + cid, await seal(msgsCache[cid] || [])), 300);
+  saveTimers[cid] = setTimeout(async () => { if (KEY) kvSet('m:' + cid, await seal(msgsCache[cid] || [])); }, 300);
 }
 
 /* ---------- toast ---------- */
 function toast(t) {
   const d = document.createElement('div'); d.className = 'toast'; d.textContent = t;
-  document.body.append(d); setTimeout(() => d.remove(), 2600);
+  document.body.append(d);
+  setTimeout(() => { d.classList.add('out'); setTimeout(() => d.remove(), 320); }, 2800);
 }
 
 /* ---------- lock screen ---------- */
@@ -81,14 +95,16 @@ async function initLock() {
   const check = await kvGet('check');
   const first = !check;
   $('#lockHelp').textContent = first
-    ? 'Choose a strong passphrase (8+ characters). It encrypts everything stored on this device. There is no recovery if you forget it.'
+    ? 'Welcome. Choose a strong passphrase (8+ characters). It protects everything on this phone. If you forget it, nobody can recover it.'
     : 'Enter your passphrase to unlock.';
   $('#lockBtn').textContent = first ? 'Create' : 'Unlock';
   $('#pin2').classList.toggle('hidden', !first);
+  $('#uname').classList.toggle('hidden', !first);
   $('#lockBtn').onclick = async () => {
     const p = $('#pin').value, err = $('#lockErr'); err.textContent = '';
     try {
       if (first) {
+        if (!$('#uname').value.trim()) return err.textContent = 'Please enter your name.';
         if (p.length < 8) return err.textContent = 'Use at least 8 characters.';
         if (p !== $('#pin2').value) return err.textContent = 'Passphrases do not match.';
         const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -103,56 +119,69 @@ async function initLock() {
       }
       failCount = 0; $('#pin').value = $('#pin2').value = '';
       await loadAll();
+      if (first) { settings.name = $('#uname').value.trim().slice(0, 40); await saveSettings(); }
       $('#lock').classList.add('hidden'); $('#app').classList.remove('hidden');
-      showList();
+      await showList(); watchContacts(); handleLinkJoin();
     } catch (e) { err.textContent = 'Error: ' + e.message; }
   };
   $('#pin').onkeydown = $('#pin2').onkeydown = e => { if (e.key === 'Enter') $('#lockBtn').click(); };
 }
 function lockNow() {
   if (call) return;
-  closePeer();
-  KEY = null; contacts = []; for (const k in msgsCache) delete msgsCache[k];
-  $('#app').classList.add('hidden'); $('#modal').classList.add('hidden'); $('#lock').classList.remove('hidden');
+  stopWatch(); stopRelay(); closePeer();
+  KEY = null; contacts = []; settings = DEFAULTS(); unread = {};
+  for (const k in msgsCache) delete msgsCache[k];
+  for (const k in ckCache) delete ckCache[k];
+  curChat = null; document.body.classList.remove('chat-open');
+  $('#app').classList.add('hidden'); $('#modal').classList.remove('show'); $('#lock').classList.remove('hidden');
   initLock();
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && KEY) lockTimer = setTimeout(lockNow, pc ? 10 * 60000 : 60000);
-  else clearTimeout(lockTimer);
+  if (document.hidden) { if (KEY && settings.lockMin > 0) lockTimer = setTimeout(lockNow, settings.lockMin * 60000); }
+  else { clearTimeout(lockTimer); if (KEY) { watchContacts(); if (curChat && !isOn(curChat)) reach(curChat); } }
 });
 
 /* ---------- views ---------- */
 const initials = n => (n || '?').trim().slice(0, 1).toUpperCase();
+function paintAv(elm, name) {
+  elm.textContent = initials(name);
+  let h = 0; for (const ch of name || '?') h = (h * 31 + ch.charCodeAt(0)) % 360;
+  elm.style.background = `hsl(${h} 45% 48%)`;
+}
+const isOn = cid => !!(conn && conn.cid === cid && dc && dc.readyState === 'open');
 async function showList() {
-  curChat = null; $('#vChat').classList.add('hidden'); $('#vList').classList.remove('hidden');
+  curChat = null; document.body.classList.remove('chat-open'); await renderList();
+}
+async function renderList() {
   const box = $('#chats'); box.innerHTML = '';
-  if (!contacts.length) { box.innerHTML = '<div class="empty">No chats yet.<br>Tap ＋ to add a contact, then connect by swapping a short code.</div>'; return; }
+  if (!contacts.length) { box.innerHTML = '<div class="empty">No friends yet.<br><br>Tap <b>＋</b> to add one. You do this only once per friend. After that, just tap their name to connect.</div>'; return; }
+  let i = 0;
   for (const c of contacts) {
     const ms = await getMsgs(c.id), last = ms[ms.length - 1];
-    const r = document.createElement('div'); r.className = 'row';
+    const r = document.createElement('div'); r.className = 'row'; r.style.animationDelay = (i++ * 40) + 'ms';
     r.innerHTML = '<div class="av"></div><div class="grow"><div class="n"></div><div class="l"></div></div><span class="badge hidden"></span><span class="dot"></span>';
-    r.querySelector('.av').textContent = initials(c.name);
+    paintAv(r.querySelector('.av'), c.name);
     r.querySelector('.n').textContent = c.name;
-    r.querySelector('.l').textContent = last ? (last.type === 'text' ? last.text : '[' + last.type + ']') : 'No messages';
+    r.querySelector('.l').textContent = last ? (last.type === 'text' ? last.text : '[' + last.type + ']') : 'Tap to chat';
     const b = r.querySelector('.badge'); if (unread[c.id]) { b.textContent = unread[c.id]; b.classList.remove('hidden'); }
-    if (conn && conn.cid === c.id) r.querySelector('.dot').classList.add('on');
+    if (isOn(c.id)) r.querySelector('.dot').classList.add('on');
     r.onclick = () => openChat(c.id);
     box.append(r);
   }
 }
 async function openChat(cid) {
   curChat = cid; unread[cid] = 0;
-  const c = contacts.find(x => x.id === cid);
-  $('#vList').classList.add('hidden'); $('#vChat').classList.remove('hidden');
-  $('#cname').textContent = c.name; $('#cav').textContent = initials(c.name);
-  updateStatus(); await renderMsgs();
+  const c = contacts.find(x => x.id === cid); if (!c) return;
+  $('#cname').textContent = c.name; paintAv($('#cav'), c.name);
+  updateStatus(); await renderMsgs(false);
+  document.body.classList.add('chat-open');
+  reach(cid);
 }
 function updateStatus() {
-  if (!curChat) return;
-  const on = conn && conn.cid === curChat && dc && dc.readyState === 'open';
-  $('#cstat').textContent = on ? 'connected · encrypted' : 'offline — tap ⋮ › Connect';
+  if (curChat === null) return;
+  const on = isOn(curChat);
+  $('#cstat').textContent = on ? 'online · encrypted' : (attempt && attempt.cid === curChat ? 'connecting…' : 'offline — waiting for your friend to open the app');
   $('#aCall').disabled = $('#vCall').disabled = !on;
-  $('#aCall').style.opacity = $('#vCall').style.opacity = on ? 1 : .35;
 }
 const tickOf = s => s === 'delivered' ? '✓✓' : s === 'sent' ? '✓' : s === 'pending' ? '⏳' : '';
 function bubble(m) {
@@ -167,10 +196,11 @@ function bubble(m) {
   del.onclick = () => { if (confirm('Delete this message' + (m.from === 'me' && conn ? ' for everyone?' : '?'))) deleteMsg(m.id, true); };
   meta.append(del); d.append(meta); return d;
 }
-async function renderMsgs() {
+async function renderMsgs(animLast) {
   if (!curChat) return;
   const box = $('#msgs'), ms = await getMsgs(curChat); box.innerHTML = '';
   for (const m of ms) box.append(bubble(m));
+  if (animLast && box.lastChild) box.lastChild.classList.add('pop');
   box.scrollTop = box.scrollHeight;
 }
 async function deleteMsg(id, remote) {
@@ -179,61 +209,95 @@ async function deleteMsg(id, remote) {
   if (i < 0) return; const m = ms[i]; ms.splice(i, 1); saveMsgs(cid); renderMsgs();
   if (remote && m.from === 'me') sendRaw({ t: 'del', id });
 }
+/* iOS-style swipe from the left edge to go back */
+(() => {
+  let x0 = null, dx = 0; const v = () => $('#vChat');
+  document.addEventListener('touchstart', e => { if (document.body.classList.contains('chat-open') && e.touches[0].clientX < 26) { x0 = e.touches[0].clientX; dx = 0; document.body.classList.add('dragging'); } }, { passive: true });
+  document.addEventListener('touchmove', e => { if (x0 === null) return; dx = Math.max(0, e.touches[0].clientX - x0); v().style.transform = `translateX(${dx}px)`; }, { passive: true });
+  document.addEventListener('touchend', () => {
+    if (x0 === null) return; document.body.classList.remove('dragging'); v().style.transform = '';
+    const go = dx > innerWidth * 0.3; x0 = null; if (go) showList();
+  });
+})();
 
-/* ---------- contacts / settings UI ---------- */
+/* ---------- sheets ---------- */
 function openSheet(build) {
-  const sh = $('#sheet'); sh.innerHTML = ''; build(sh); $('#modal').classList.remove('hidden');
+  const sh = $('#sheet'); sh.innerHTML = ''; build(sh);
+  requestAnimationFrame(() => $('#modal').classList.add('show'));
 }
-const closeSheet = () => { $('#modal').classList.add('hidden'); stopScan(); stopRelay(); };
+const closeSheet = () => { $('#modal').classList.remove('show'); stopRelay(); pairing = false; };
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeSheet(); });
 function el(tag, props = {}, ...kids) {
   const e = document.createElement(tag); Object.assign(e, props);
   kids.forEach(k => e.append(k)); return e;
 }
 $('#newChat').onclick = () => openSheet(sh => {
-  const inp = el('input', { placeholder: 'Contact name' });
-  sh.append(el('h2', { textContent: 'New contact' }), el('p', { textContent: 'The name is only stored on your device.' }), inp,
-    el('button', { className: 'pri', textContent: 'Add', onclick: async () => {
-      const n = inp.value.trim(); if (!n) return;
-      const c = { id: uid(), name: n, ttl: 0 }; contacts.push(c); await saveContacts(); closeSheet(); showList(); openChat(c.id);
-    } }));
-  setTimeout(() => inp.focus(), 50);
+  sh.append(el('h2', { textContent: 'Add a friend' }),
+    el('p', { textContent: 'You do this only once per friend. After that your friend stays saved and you connect by just tapping their name.' }),
+    el('button', { className: 'pri', textContent: 'Invite a friend', onclick: inviteFlow }),
+    el('button', { textContent: 'I have a code or link', onclick: joinAsk }));
 });
 $('#openSettings').onclick = () => openSheet(sh => {
   const nm = el('input', { value: settings.name, placeholder: 'Your name' });
-  const st = el('input', { type: 'checkbox', checked: settings.stun, style: 'width:auto' });
+  const ns = el('input', { type: 'checkbox', checked: settings.noStore });
+  const st = el('input', { type: 'checkbox', checked: settings.stun });
+  const lm = el('select', {}, ...[[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Never']].map(([v, t]) => el('option', { value: v, textContent: t, selected: settings.lockMin === v })));
   sh.append(el('h2', { textContent: 'Settings' }),
-    el('p', { textContent: 'Your name (shown to the person you connect with)' }), nm,
-    el('label', {}, st, document.createTextNode(' Use a public STUN server to connect across the internet (it only learns your IP address, never your content). Turn off to connect only on the same Wi‑Fi.')),
+    el('p', { textContent: 'Your name (shown to friends)' }), nm,
+    el('label', {}, ns, el('span', { textContent: 'Do not save messages on this phone. Chats live in memory only and disappear when the app locks or closes. Your friends stay saved.' })),
+    el('p', { textContent: 'Lock the app after leaving it for' }), lm,
+    el('label', {}, st, el('span', { textContent: 'Use a public STUN server so you can connect over the internet. It only learns your IP address, never your content.' })),
     el('button', { className: 'pri', textContent: 'Save', onclick: async () => {
-      settings.name = nm.value.trim() || 'Me'; settings.stun = st.checked; await saveSettings(); closeSheet(); toast('Saved');
+      const turnedOn = ns.checked && !settings.noStore;
+      settings.name = nm.value.trim().slice(0, 40) || settings.name; settings.noStore = ns.checked; settings.stun = st.checked; settings.lockMin = +lm.value;
+      await saveSettings();
+      if (turnedOn) for (const c of contacts) await kvDel('m:' + c.id);
+      closeSheet(); toast('Saved');
     } }),
-    el('button', { textContent: '🔒 Lock now', onclick: () => { closeSheet(); lockNow(); } }),
-    el('button', { className: 'danger', textContent: 'Erase all data on this device', onclick: async () => {
-      if (!confirm('Erase ALL chats, contacts and the passphrase from this device?')) return;
+    el('button', { textContent: '💾 Back up my friends', onclick: backup }),
+    el('button', { textContent: '♻️ Restore from backup', onclick: () => $('#bfile').click() }),
+    el('button', { textContent: '🔒 Lock now', onclick: () => { closeSheet(); setTimeout(lockNow, 300); } }),
+    el('button', { className: 'danger', textContent: 'Erase everything on this phone', onclick: async () => {
+      if (!confirm('Erase ALL friends, chats and your passphrase from this phone?')) return;
       closePeer(); await kvClear(); localStorage.clear(); location.reload();
     } }));
 });
+async function backup() {
+  const data = await seal({ myId: settings.myId, name: settings.name, contacts: contacts.filter(c => c.ps) });
+  const blob = new Blob([JSON.stringify({ v: 1, salt: localStorage.getItem('sc_salt'), data: b64u(data) })], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'securechat-backup.json'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000); toast('Backup saved. Keep the file safe.');
+}
+$('#bfile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text()); const pass = prompt('Passphrase you used when this backup was made:'); if (!pass) return;
+    const k = await deriveKey(pass, Uint8Array.from(atob(j.salt), c => c.charCodeAt(0)));
+    const o = await unsealWith(k, unb64u(j.data));
+    settings.myId = o.myId; if (o.name) settings.name = o.name;
+    for (const c of o.contacts) if (!contacts.some(x => x.pid === c.pid)) contacts.push(c);
+    await saveSettings(); await saveContacts(); closeSheet(); await renderList(); watchContacts(); toast('Restored ' + o.contacts.length + ' friend(s)');
+  } catch { toast('Could not restore. Wrong passphrase or file.'); }
+};
 $('#back').onclick = showList;
 $('#cMenu').onclick = () => openSheet(sh => {
-  const c = contacts.find(x => x.id === curChat);
-  const on = conn && conn.cid === curChat && dc && dc.readyState === 'open';
+  const c = contacts.find(x => x.id === curChat); if (!c) return;
   const ttl = el('select', {}, ...[[0, 'Off'], [3600, '1 hour'], [86400, '24 hours'], [604800, '7 days']].map(([v, t]) => el('option', { value: v, textContent: t, selected: c.ttl === v })));
   ttl.onchange = async () => { c.ttl = +ttl.value; await saveContacts(); sendRaw({ t: 'ttl', v: c.ttl }); purge(); toast('Disappearing messages updated'); };
-  sh.append(el('h2', { textContent: c.name }),
-    el('button', { className: 'pri', textContent: on ? 'Connected ✓' : 'Connect…', onclick: () => { closeSheet(); if (!on) connectFlow(); } }));
-  if (on) sh.append(el('button', { textContent: '🔐 Verify safety code', onclick: showSafety }));
+  sh.append(el('h2', { textContent: c.name }));
+  if (!isOn(c.id)) sh.append(el('button', { className: 'pri', textContent: 'Connect now', onclick: () => { closeSheet(); attempt = null; reach(c.id); } }));
+  else sh.append(el('button', { textContent: '🔐 Verify safety code', onclick: showSafety }));
   sh.append(el('p', { textContent: 'Disappearing messages' }), ttl,
-    el('button', { textContent: 'Rename', onclick: async () => { const n = prompt('Name', c.name); if (n) { c.name = n.trim(); await saveContacts(); closeSheet(); openChat(c.id); } } }),
-    el('button', { className: 'danger', textContent: 'Delete chat', onclick: async () => {
-      if (!confirm('Delete this contact and all messages?')) return;
-      contacts = contacts.filter(x => x.id !== c.id); await kvDel('m:' + c.id); delete msgsCache[c.id]; await saveContacts(); closeSheet(); showList();
+    el('button', { textContent: 'Rename', onclick: async () => { const n = prompt('Name', c.name); if (n) { c.name = n.trim().slice(0, 40); await saveContacts(); closeSheet(); $('#cname').textContent = c.name; paintAv($('#cav'), c.name); } } }),
+    el('button', { className: 'danger', textContent: 'Remove friend', onclick: async () => {
+      if (!confirm('Remove this friend and all messages?')) return;
+      contacts = contacts.filter(x => x.id !== c.id); delete ckCache[c.id]; await kvDel('m:' + c.id); delete msgsCache[c.id]; await saveContacts(); closeSheet(); if (isOn(c.id)) closePeer(); watchContacts(); showList();
     } }));
 });
 function showSafety() {
   openSheet(sh => {
     sh.append(el('h2', { textContent: 'Safety code' }),
-      el('p', { textContent: 'Read this code to your contact over a voice call or in person. If both screens show the same number, nobody is intercepting your connection.' }),
+      el('p', { textContent: 'Read this number to your friend on a call or in person. If both screens show the same number, nobody is intercepting the connection.' }),
       el('div', { className: 'safety', textContent: conn ? conn.safety : '—' }),
       el('button', { textContent: 'Close', onclick: closeSheet }));
   });
@@ -241,15 +305,14 @@ function showSafety() {
 
 /* ---------- WebRTC core ---------- */
 let pc = null, dc = null, polite = false, makingOffer = false, ignoreOffer = false, remoteStream = null;
-const b64u = u8 => btoa(String.fromCharCode(...u8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+let attempt = null;   // {cid, pc, t} — a connection we are currently trying to make
 async function pack(d) {
   const s = JSON.stringify({ t: d.type[0], s: d.sdp });
   const cs = new Blob([enc.encode(s)]).stream().pipeThrough(new CompressionStream('deflate-raw'));
   return 'SC1.' + b64u(new Uint8Array(await new Response(cs).arrayBuffer()));
 }
 async function unpack(text) {
-  const m = (text || '').match(/SC1\.[A-Za-z0-9_-]+/); if (!m) throw new Error('That is not a SecureChat code.');
+  const m = (text || '').match(/SC1\.[A-Za-z0-9_-]+/); if (!m) throw new Error('Not a SecureChat code.');
   const ds = new Blob([unb64u(m[0].slice(4))]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
   const o = JSON.parse(await new Response(ds).text());
   return { type: o.t === 'o' ? 'offer' : 'answer', sdp: o.s };
@@ -271,10 +334,11 @@ function gathered() {
 function newPC() {
   closePeer();
   pc = new RTCPeerConnection({ iceServers: settings.stun ? [{ urls: 'stun:stun.l.google.com:19302' }] : [] });
+  const me = pc;
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' && !conn) { toast('Could not connect. Try both phones on the same Wi‑Fi, then Start again.'); closePeer(); }
+    if (pc !== me) return;
+    if (pc.connectionState === 'failed' && !conn) { toast('Could not connect. Try both phones on the same Wi‑Fi.'); closePeer(); }
     else if (['failed', 'closed'].includes(pc.connectionState)) peerLost();
-    else if (pc.connectionState === 'disconnected') $('#cstat').textContent = 'reconnecting…';
     else updateStatus();
   };
   pc.ontrack = e => {
@@ -284,7 +348,6 @@ function newPC() {
     remoteStream.onremovetrack = updateRemoteView;
   };
   pc.onicecandidate = e => { if (e.candidate && dc && dc.readyState === 'open') sendRaw({ t: 'ice', d: e.candidate }); };
-  pc.onnegotiationneeded = null;
   return pc;
 }
 function armRenegotiation() {
@@ -294,23 +357,36 @@ function armRenegotiation() {
   };
 }
 function closePeer() {
-  try { dc && dc.close(); } catch {} try { pc && pc.close(); } catch {}
-  dc = pc = null; conn = null; endCallLocal(); updateStatus();
+  const old = pc, oldDc = dc;
+  pc = dc = null; conn = null; attempt = null;
+  try { oldDc && oldDc.close(); } catch {} try { old && old.close(); } catch {}
+  endCallLocal(); updateStatus();
 }
-function peerLost() { const was = conn; closePeer(); if (was) { toast('Disconnected'); if (!$('#vList').classList.contains('hidden')) showList(); } }
+function peerLost() {
+  const was = conn; closePeer();
+  if (was) { toast('Disconnected'); if (curChat === null) renderList(); }
+}
 function setupDC(cid) {
+  const myDc = dc; let opened = false; const early = [];   // messages that arrive before our open handler has run
   dc.onopen = async () => {
+    if (dc !== myDc || opened) return; opened = true;
     armRenegotiation();
-    conn = { cid, safety: await safetyCode() };
-    sendRaw({ t: 'hi', name: settings.name });
+    conn = { cid, safety: '…', rnd: b64u(crypto.getRandomValues(new Uint8Array(16))) };
+    attempt = null; pairing = false; stopRelay();
+    const sendPair = re => sendRaw({ t: 'pair', id: settings.myId, name: settings.name, rnd: conn.rnd, re: !!re });
+    sendPair(false);
+    (async () => { for (const d of [800, 1700, 3000, 5000]) { await sleep(d); if (dc !== myDc || !conn || conn.gotPair) return; sendPair(false); } })();
     const c = contacts.find(x => x.id === cid); if (c && c.ttl) sendRaw({ t: 'ttl', v: c.ttl });
-    updateStatus(); closeSheet(); toast('Connected — encrypted'); if (!curChat) showList();
+    for (const m of early.splice(0)) onWire(m);
+    conn.safety = await safetyCode();
+    updateStatus(); toast('Connected — encrypted');
+    if (c && !c.ps) { closeSheet(); await openChat(cid); } else if (curChat === null) renderList();
     const ms = await getMsgs(cid);
     for (const m of ms.filter(m => m.from === 'me' && m.status === 'pending')) { await wire(m); m.status = 'sent'; }
     saveMsgs(cid); if (curChat === cid) renderMsgs();
   };
-  dc.onclose = () => { if (conn) peerLost(); };
-  dc.onmessage = e => onWire(JSON.parse(e.data));
+  dc.onclose = () => { if (dc === myDc && conn) peerLost(); };
+  dc.onmessage = e => { const o = JSON.parse(e.data); if (opened) onWire(o); else early.push(o); };
   if (dc.readyState === 'open') dc.onopen();
 }
 const sendRaw = o => { if (dc && dc.readyState === 'open') dc.send(JSON.stringify(o)); };
@@ -318,14 +394,27 @@ async function wire(m) {
   const data = m.data || '', CH = 12000, n = Math.ceil(data.length / CH);
   sendRaw({ t: 'msg', id: m.id, type: m.type, text: m.text, name: m.name, mime: m.mime, ts: m.ts, n });
   for (let i = 0; i < n; i++) {
-    while (dc.bufferedAmount > 1e6) await sleep(40);
+    while (dc && dc.bufferedAmount > 1e6) await sleep(40);
     sendRaw({ t: 'chunk', id: m.id, i, d: data.slice(i * CH, (i + 1) * CH) });
   }
 }
 async function onWire(o) {
   const cid = conn && conn.cid;
   switch (o.t) {
-    case 'hi': break;
+    case 'pair': {
+      const c = contacts.find(x => x.id === cid); if (!c) break;
+      conn.gotPair = true;
+      if (!o.re) sendRaw({ t: 'pair', id: settings.myId, name: settings.name, rnd: conn.rnd, re: true });
+      if (c.pid && c.pid !== o.id) { toast('⚠️ This is not the same person you saved. Disconnected.'); closePeer(); break; }
+      if (!c.ps) {
+        const both = [conn.rnd, o.rnd].sort().join('|');
+        c.ps = b64u(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(both))));
+        c.pid = o.id; if (!c.name || c.name === 'New friend') c.name = (o.name || 'Friend').slice(0, 40);
+        await saveContacts(); watchContacts();
+        if (curChat === cid) { $('#cname').textContent = c.name; paintAv($('#cav'), c.name); }
+      }
+      break;
+    }
     case 'msg': incoming[o.id] = { meta: o, parts: [] }; if (!o.n) finishIncoming(o.id); break;
     case 'chunk': { const x = incoming[o.id]; if (!x) break; x.parts.push(o.d); if (x.parts.length >= x.meta.n) finishIncoming(o.id); break; }
     case 'ack': { const ms = await getMsgs(cid); const m = ms.find(m => m.id === o.id); if (m) { m.status = 'delivered'; saveMsgs(cid); if (curChat === cid) renderMsgs(); } break; }
@@ -335,7 +424,7 @@ async function onWire(o) {
     case 'sdp': await onSdp(o.d); break;
     case 'ice': try { await pc.addIceCandidate(o.d); } catch (e) { if (!ignoreOffer) console.warn(e); } break;
     case 'call': onIncomingCall(o.video); break;
-    case 'call-ok': if (call) { call.answered = true; await attachLocal(); setCallState('Connected'); startTimer(); } break;
+    case 'call-ok': if (call) { ring(false); call.answered = true; await attachLocal(); setCallState('Connected'); startTimer(); } break;
     case 'call-no': if (call) { toast('Call declined'); endCallLocal(); } break;
     case 'end': if (call) { toast('Call ended'); endCallLocal(); } break;
   }
@@ -345,7 +434,7 @@ async function finishIncoming(id) {
   const ms = await getMsgs(cid);
   ms.push({ id: o.id, from: 'them', type: o.type, text: o.text, name: o.name, mime: o.mime, ts: o.ts, data: x.parts.join('') });
   saveMsgs(cid); sendRaw({ t: 'ack', id: o.id });
-  if (curChat === cid) { renderMsgs(); $('#typing').textContent = ''; } else { unread[cid] = (unread[cid] || 0) + 1; if (!curChat) showList(); }
+  if (curChat === cid) { renderMsgs(true); $('#typing').textContent = ''; } else { unread[cid] = (unread[cid] || 0) + 1; if (curChat === null) renderList(); }
 }
 async function onSdp(d) {
   const collision = d.type === 'offer' && (makingOffer || pc.signalingState !== 'stable');
@@ -354,188 +443,186 @@ async function onSdp(d) {
   if (d.type === 'offer') { await pc.setLocalDescription(); sendRaw({ t: 'sdp', d: pc.localDescription }); }
 }
 
-/* ---------- connect flow (swap codes) ---------- */
-function codeBlock(code) {
-  const wrap = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
-  wrap.append(el('div', { className: 'code', textContent: code }),
-    el('div', { className: 'btns' },
-      el('button', { textContent: 'Copy', onclick: async () => { await navigator.clipboard.writeText(code); toast('Copied'); } }),
-      navigator.share ? el('button', { textContent: 'Share…', onclick: () => navigator.share({ text: code }).catch(() => {}) }) : document.createTextNode('')));
-  return wrap;
-}
-let scanStream = null, scanning = false;
-function stopScan() { scanning = false; if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; } }
-async function scanInto(textarea, video) {
-  if (!('BarcodeDetector' in window)) return toast('QR scanning is not supported here — paste the code instead');
-  try {
-    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-    video.srcObject = scanStream; video.classList.remove('hidden'); await video.play();
-    const det = new BarcodeDetector({ formats: ['qr_code'] }); scanning = true;
-    while (scanning) {
-      const r = await det.detect(video).catch(() => []);
-      if (r.length && /SC1\./.test(r[0].rawValue)) { textarea.value = r[0].rawValue; stopScan(); video.classList.add('hidden'); toast('Code scanned'); break; }
-      await sleep(250);
-    }
-  } catch { toast('Camera not available'); }
-}
-function connectFlow() {
-  if (!curChat) return;
-  const cid = curChat;
-  openSheet(sh => {
-    sh.append(el('h2', { textContent: 'Connect (easy way)' }),
-      el('p', { textContent: 'Both of you open this app. One taps “Create room code” and tells the code to the other (message, call, anything). The other taps “Join with code” and types it. That is all.' }),
-      el('button', { className: 'pri', textContent: '1. Create room code', onclick: () => hostEasy(cid) }),
-      el('button', { className: 'pri', textContent: '2. Join with code', onclick: () => joinAsk(cid) }),
-      el('p', { textContent: 'Problems with the relay? Manual way:' }),
-      el('div', { className: 'btns' },
-        el('button', { textContent: 'Manual: Start', onclick: () => hostFlow(cid) }),
-        el('button', { textContent: 'Manual: Join', onclick: () => joinFlow(cid) })));
-  });
-}
-
-/* ---------- easy connect: room code via a public relay (ntfy.sh) ----------
-   The relay only ever sees an AES-GCM encrypted blob. The key comes from the room code,
-   which you tell your contact yourself. Messages and calls never go through the relay. */
+/* ---------- relay helpers (ntfy.sh): only encrypted notes pass through ---------- */
 const RELAY = 'https://ntfy.sh/';
-const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const genCode = () => { const b = crypto.getRandomValues(new Uint8Array(10)); const t = [...b].map(x => ALPHA[x & 31]).join(''); return t.slice(0, 5) + '-' + t.slice(5); };
-const normCode = c => (c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-async function roomKeys(code) {
-  const base = await crypto.subtle.importKey('raw', enc.encode(normCode(code)), 'PBKDF2', false, ['deriveBits']);
-  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('securechat-room-v1'), iterations: 200000, hash: 'SHA-256' }, base, 384));
-  const topic = 'sc' + [...bits.slice(0, 16)].map(x => x.toString(16).padStart(2, '0')).join('');
-  const key = await crypto.subtle.importKey('raw', bits.slice(16, 48), 'AES-GCM', false, ['encrypt', 'decrypt']);
-  return { topic, key };
+async function postRoom(topic, text) {
+  const r = await fetch(RELAY + topic, { method: 'POST', body: text });
+  if (!r.ok) throw new Error('Relay error ' + r.status);
 }
-async function roomSeal(key, obj) {
+async function sealNote(key, obj) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj))));
   const o = new Uint8Array(12 + ct.length); o.set(iv); o.set(ct, 12); return b64u(o);
 }
-async function roomOpen(key, str) {
+async function openNote(key, str) {
   const b = unb64u(str);
   return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, key, b.slice(12))));
 }
-let relayES = null, relayTO = null;
+
+/* ----- first-time pairing with a room code (once per friend) ----- */
+const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const genCode = () => { const b = crypto.getRandomValues(new Uint8Array(8)); const t = [...b].map(x => ALPHA[x & 31]).join(''); return t.slice(0, 4) + '-' + t.slice(4); };
+const normCode = c => (c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+async function roomKeys(code) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(normCode(code)), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('securechat-room-v2'), iterations: 250000, hash: 'SHA-256' }, base, 384));
+  return { topic: 'sc' + hex(bits.slice(0, 16)), key: await crypto.subtle.importKey('raw', bits.slice(16, 48), 'AES-GCM', false, ['encrypt', 'decrypt']) };
+}
+let relayES = null, relayTO = null, pairing = false;
 function stopRelay() { if (relayES) { relayES.close(); relayES = null; } clearTimeout(relayTO); }
 function listenRoom(topic, onmsg) {
   stopRelay();
   const es = new EventSource(RELAY + topic + '/sse?since=all'); relayES = es;
   es.onmessage = ev => { try { const j = JSON.parse(ev.data); if (j.event === 'message') onmsg(j.message); } catch {} };
-  relayTO = setTimeout(() => { if (relayES === es) { stopRelay(); setRoomStatus('Room expired. Close and create a new one.'); } }, 10 * 60000);
+  relayTO = setTimeout(() => { if (relayES === es) { stopRelay(); setRoomStatus('Code expired. Close this and start again.', false); } }, 10 * 60000);
 }
-async function postRoom(topic, text) {
-  const r = await fetch(RELAY + topic, { method: 'POST', body: text });
-  if (!r.ok) throw new Error('Relay error ' + r.status);
+function setRoomStatus(t, spin = true) {
+  const e = $('#roomStatus'); if (!e) return; e.textContent = t;
+  const s = $('#roomSpin'); if (s) s.classList.toggle('hidden', !spin);
 }
-const setRoomStatus = t => { const e = $('#roomStatus'); if (e) e.textContent = t; };
-function showRoomSheet(code) {
+function newPending() { const c = { id: uid(), name: 'New friend', ttl: 0 }; contacts.push(c); return c; }
+function dropPending(id) { const c = contacts.find(x => x.id === id); if (c && !c.ps) contacts = contacts.filter(x => x.id !== id); }
+async function inviteFlow() {
+  const code = genCode(), link = location.origin + location.pathname + '#j=' + normCode(code);
+  pairing = true;
   openSheet(sh => {
-    const share = 'SecureChat room code: ' + code + '\nOpen: ' + location.origin + location.pathname;
-    sh.append(el('h2', { textContent: 'Your room code' }),
-      el('div', { style: 'font:700 32px ui-monospace,monospace;letter-spacing:3px;text-align:center;padding:10px;user-select:all', textContent: code }),
-      el('p', { textContent: 'Tell this code to your contact. They open SecureChat, add you, tap Connect › “Join with code” and type it. Keep this app open until it says connected.' }),
+    const share = 'Join me on SecureChat.\nTap this link: ' + link + '\n(or open the app, tap ＋ and enter code ' + code + ')';
+    sh.append(el('h2', { textContent: 'Invite a friend' }),
+      el('div', { className: 'bigcode', textContent: code }),
+      el('p', { textContent: 'Send your friend the link below. When they open it, you two connect by themselves. Keep this screen open until it says connected.' }),
       el('div', { className: 'btns' },
-        el('button', { textContent: 'Copy', onclick: async () => { try { await navigator.clipboard.writeText(share); toast('Copied'); } catch { toast('Copy failed'); } } }),
-        navigator.share ? el('button', { textContent: 'Share…', onclick: () => navigator.share({ text: share }).catch(() => {}) }) : document.createTextNode('')),
-      el('p', { id: 'roomStatus', textContent: 'Preparing…' }));
+        el('button', { className: 'pri', textContent: 'Share link', onclick: () => { if (navigator.share) navigator.share({ text: share }).catch(() => {}); else navigator.clipboard.writeText(share).then(() => toast('Link copied')); } }),
+        el('button', { textContent: 'Copy', onclick: async () => { try { await navigator.clipboard.writeText(share); toast('Copied'); } catch { toast('Copy failed'); } } })),
+      el('div', { id: 'roomSpin', className: 'spin' }),
+      el('p', { id: 'roomStatus', textContent: 'Preparing…', style: 'text-align:center' }));
   });
-}
-async function hostEasy(cid) {
-  const code = genCode(); showRoomSheet(code);
+  const c = newPending();
   try {
     const { topic, key } = await roomKeys(code);
-    newPC(); polite = false; const myPc = pc;
-    dc = pc.createDataChannel('chat'); setupDC(cid);
+    newPC(); polite = false; const my = pc;
+    dc = pc.createDataChannel('chat'); setupDC(c.id);
     await pc.setLocalDescription(await pc.createOffer()); await gathered();
     const sdp = await pack(pc.localDescription);
-    await postRoom(topic, JSON.stringify({ t: 'o', d: await roomSeal(key, { sdp, ts: Date.now() }) }));
-    setRoomStatus('Waiting for your contact to join…');
+    await postRoom(topic, JSON.stringify({ t: 'o', d: await sealNote(key, { sdp, ts: Date.now() }) }));
+    setRoomStatus('Waiting for your friend…');
     let done = false;
     listenRoom(topic, async m => {
-      if (done || pc !== myPc) return;
+      if (done || pc !== my) return;
       try {
         const j = JSON.parse(m); if (j.t !== 'a') return;
-        const o = await roomOpen(key, j.d); if (Date.now() - o.ts > 15 * 60000) return;
+        const o = await openNote(key, j.d); if (Date.now() - o.ts > 15 * 60000) return;
         done = true; stopRelay(); setRoomStatus('Connecting…');
         await pc.setRemoteDescription(await unpack(o.sdp));
       } catch (e) { console.warn(e); }
     });
-  } catch (e) { closePeer(); setRoomStatus('Cannot reach the relay server. Check your internet, or use the manual way.'); }
+  } catch (e) { dropPending(c.id); closePeer(); setRoomStatus('Cannot reach the connect server. Check your internet.', false); }
 }
-function joinAsk(cid) {
+function joinAsk(prefill) {
+  pairing = true;
   openSheet(sh => {
-    const inp = el('input', { placeholder: 'XXXXX-XXXXX', autocapitalize: 'characters', autocomplete: 'off', style: 'font:700 24px ui-monospace,monospace;text-align:center;letter-spacing:2px;text-transform:uppercase' });
-    sh.append(el('h2', { textContent: 'Join with code' }), el('p', { textContent: 'Type the room code your contact gave you.' }), inp,
-      el('button', { className: 'pri', textContent: 'Join', onclick: () => joinEasy(cid, inp.value) }));
-    setTimeout(() => inp.focus(), 50);
+    const inp = el('input', { value: typeof prefill === 'string' ? prefill : '', placeholder: 'XXXX-XXXX', autocapitalize: 'characters', autocomplete: 'off', style: 'font:700 26px ui-monospace,monospace;text-align:center;letter-spacing:3px;text-transform:uppercase' });
+    sh.append(el('h2', { textContent: 'Enter friend’s code' }), el('p', { textContent: 'Type the code your friend gave you. (If you got a link, just tap the link instead.)' }), inp,
+      el('button', { className: 'pri', textContent: 'Connect', onclick: () => joinEasy(inp.value) }));
+    setTimeout(() => inp.focus(), 300);
   });
 }
-async function joinEasy(cid, codeText) {
-  if (normCode(codeText).length !== 10) return toast('The code has 10 letters/numbers');
-  openSheet(sh => sh.append(el('h2', { textContent: 'Joining…' }), el('p', { id: 'roomStatus', textContent: 'Looking for the room… keep this app open.' })));
+async function joinEasy(codeText) {
+  if (normCode(codeText).length !== 8) return toast('The code has 8 letters/numbers');
+  pairing = true;
+  openSheet(sh => sh.append(el('h2', { textContent: 'Connecting…' }), el('div', { id: 'roomSpin', className: 'spin' }), el('p', { id: 'roomStatus', textContent: 'Looking for your friend… keep this app open.', style: 'text-align:center' })));
+  const c = newPending();
   try {
     const { topic, key } = await roomKeys(codeText); let done = false;
     listenRoom(topic, async m => {
       if (done) return;
       try {
         const j = JSON.parse(m); if (j.t !== 'o') return;
-        const o = await roomOpen(key, j.d); if (Date.now() - o.ts > 15 * 60000) return;
+        const o = await openNote(key, j.d); if (Date.now() - o.ts > 15 * 60000) return;
         done = true; setRoomStatus('Found. Connecting…');
-        newPC(); polite = true; pc.ondatachannel = e => { dc = e.channel; setupDC(cid); };
+        newPC(); polite = true; pc.ondatachannel = e => { dc = e.channel; setupDC(c.id); };
         await pc.setRemoteDescription(await unpack(o.sdp)); await pc.setLocalDescription(await pc.createAnswer()); await gathered();
-        await postRoom(topic, JSON.stringify({ t: 'a', d: await roomSeal(key, { sdp: await pack(pc.localDescription), ts: Date.now() }) }));
+        await postRoom(topic, JSON.stringify({ t: 'a', d: await sealNote(key, { sdp: await pack(pc.localDescription), ts: Date.now() }) }));
         stopRelay(); setRoomStatus('Connecting… keep this app open.');
-      } catch (e) { setRoomStatus('Problem: ' + (e.message || e) + '. Close and try again.'); }
+      } catch (e) { setRoomStatus('Problem: ' + (e.message || e), false); }
     });
-  } catch (e) { setRoomStatus('Cannot reach the relay server. Check your internet.'); }
+  } catch (e) { dropPending(c.id); setRoomStatus('Cannot reach the connect server. Check your internet.', false); }
+}
+let linkCode = (location.hash.match(/[#&]j=([A-Za-z0-9]{8})/) || [])[1] || null;
+function handleLinkJoin() {
+  if (!linkCode) return;
+  const code = linkCode; linkCode = null; history.replaceState(null, '', location.pathname + location.search);
+  setTimeout(() => joinEasy(code), 400);
 }
 
-async function hostFlow(cid) {
-  openSheet(sh => sh.append(el('h2', { textContent: 'Preparing invite…' })));
-  newPC(); polite = false;
-  dc = pc.createDataChannel('chat'); setupDC(cid);
-  await pc.setLocalDescription(await pc.createOffer()); await gathered();
-  const code = await pack(pc.localDescription);
-  openSheet(sh => {
-    const ta = el('textarea', { rows: 3, placeholder: 'Paste your contact’s reply code here' });
-    const vid = el('video', { id: 'scanv', playsInline: true, muted: true, className: 'hidden' }); vid.id = 'scanv';
-    sh.append(el('h2', { textContent: '1. Send this invite' }), codeBlock(code),
-      el('h2', { textContent: '2. Enter their reply' }), ta, vid,
-      el('div', { className: 'btns' },
-        el('button', { className: 'pri', textContent: 'Connect', onclick: async () => {
-          try {
-            stopScan(); if (!pc) return toast('Session expired. Close this and tap Start again.');
-            await pc.setRemoteDescription(await unpack(ta.value)); toast('Connecting… keep this app open');
-          } catch (e) { toast(e.message || 'Invalid code'); }
-        } })));
-  });
+/* ----- saved friends: automatic reconnect, no codes ----- */
+const ckCache = {};
+async function ckeys(c) {
+  if (ckCache[c.id]) return ckCache[c.id];
+  const ps = unb64u(c.ps);
+  const h = async tag => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([...ps, ...enc.encode(tag)])));
+  const t = await h('topic'), k = await h('key');
+  return ckCache[c.id] = { topic: 'sc' + hex(t.slice(0, 16)), key: await crypto.subtle.importKey('raw', k, 'AES-GCM', false, ['encrypt', 'decrypt']) };
 }
-async function joinFlow(cid) {
-  openSheet(sh => {
-    const ta = el('textarea', { rows: 3, placeholder: 'Paste the invite code here' });
-    const vid = el('video', { playsInline: true, muted: true, className: 'hidden' }); vid.id = 'scanv';
-    sh.append(el('h2', { textContent: 'Enter the invite' }), ta, vid,
-      el('div', { className: 'btns' },
-        el('button', { className: 'pri', textContent: 'Create reply', onclick: async () => {
-          try {
-            stopScan(); const offer = await unpack(ta.value);
-            newPC(); polite = true; pc.ondatachannel = e => { dc = e.channel; setupDC(cid); };
-            await pc.setRemoteDescription(offer); await pc.setLocalDescription(await pc.createAnswer()); await gathered();
-            const code = await pack(pc.localDescription);
-            openSheet(s2 => s2.append(el('h2', { textContent: 'Show this reply to your contact' }),
-              el('p', { textContent: 'Copy this code and send it to your contact. Then come BACK to this app and keep it open. It connects automatically when they enter it.' }), codeBlock(code)));
-          } catch (e) { toast(e.message || 'Invalid code'); }
-        } })));
-  });
+const amOfferer = c => settings.myId > c.pid;     // fixed roles avoid both sides offering at once
+const postNote = async (k, t, payload) => postRoom(k.topic, JSON.stringify({ t, d: await sealNote(k.key, { ...payload, ts: Date.now(), from: settings.myId }) }));
+let watchES = null, watchMap = {}, answering = false; const seen = new Set();
+function stopWatch() { if (watchES) { watchES.close(); watchES = null; } }
+async function watchContacts() {
+  stopWatch(); if (!KEY) return;
+  const cs = contacts.filter(c => c.ps); if (!cs.length) return;
+  const map = {}; for (const c of cs) { const k = await ckeys(c); map[k.topic] = { c, k }; }
+  watchMap = map;
+  const es = new EventSource(RELAY + Object.keys(map).join(',') + '/sse?since=3m'); watchES = es;
+  es.onmessage = ev => { try { const j = JSON.parse(ev.data); if (j.event === 'message' && watchMap[j.topic]) onContactNote(watchMap[j.topic], j.message, j.id); } catch {} };
 }
+async function onContactNote({ c, k }, m, id) {
+  if (!KEY || (id && seen.has(id))) return; if (id) seen.add(id);
+  try {
+    const j = JSON.parse(m), o = await openNote(k.key, j.d);
+    if (o.from === settings.myId || Date.now() - o.ts > 150000) return;
+    const busy = attempt && attempt.cid === c.id && attempt.pc && Date.now() - attempt.t < 20000;   // an attempt is already in progress
+    if (j.t === 'k') { if (amOfferer(c) && !conn && !pairing && !busy) offerTo(c, k); }
+    else if (j.t === 'o') { if (!amOfferer(c) && !conn && !pairing && !(attempt && attempt.oid && attempt.oid === o.oid)) answerTo(c, k, o.sdp, o.oid); }
+    else if (j.t === 'a') {
+      if (attempt && attempt.cid === c.id && attempt.oid && attempt.oid === o.oid && pc === attempt.pc && pc.signalingState === 'have-local-offer') await pc.setRemoteDescription(await unpack(o.sdp));
+    }
+  } catch (e) { /* not for us / bad note */ }
+}
+async function offerTo(c, k) {
+  if (conn || pairing) return;
+  newPC(); polite = false; const my = pc; const oid = uid();
+  dc = pc.createDataChannel('chat'); setupDC(c.id); attempt = { cid: c.id, pc: my, t: Date.now(), oid }; updateStatus();
+  try {
+    await pc.setLocalDescription(await pc.createOffer()); await gathered(); if (pc !== my) return;
+    await postNote(k, 'o', { sdp: await pack(pc.localDescription), oid });
+  } catch (e) { console.warn(e); if (pc === my) closePeer(); }
+}
+async function answerTo(c, k, sdp, oid) {
+  answering = true;
+  try {
+    newPC(); polite = true; const my = pc; attempt = { cid: c.id, pc: my, t: Date.now(), oid }; updateStatus();
+    pc.ondatachannel = e => { dc = e.channel; setupDC(c.id); };
+    await pc.setRemoteDescription(await unpack(sdp)); await pc.setLocalDescription(await pc.createAnswer()); await gathered();
+    if (pc !== my) return; await postNote(k, 'a', { sdp: await pack(pc.localDescription), oid });
+  } catch (e) { console.warn(e); } finally { answering = false; }
+}
+async function reach(cid) {
+  const c = contacts.find(x => x.id === cid); if (!c || !c.ps || !KEY || isOn(cid) || pairing) return;
+  if (attempt && attempt.cid === cid && attempt.pc && Date.now() - attempt.t < 30000) return;
+  try {
+    const k = await ckeys(c);
+    if (amOfferer(c)) await offerTo(c, k);
+    else { attempt = { cid, pc: null, t: Date.now() }; updateStatus(); await postNote(k, 'k', {}); }
+  } catch (e) { attempt = null; updateStatus(); toast('Cannot reach the connect server. Check your internet.'); }
+}
+setInterval(() => { if (KEY && curChat && !document.hidden && !isOn(curChat)) reach(curChat); }, 15000);
 
 /* ---------- sending ---------- */
 async function addMsg(partial) {
   const cid = curChat; if (!cid) return;
-  const online = conn && conn.cid === cid && dc && dc.readyState === 'open';
+  const online = isOn(cid);
   const m = Object.assign({ id: uid(), from: 'me', ts: Date.now(), status: online ? 'sent' : 'pending' }, partial);
-  const ms = await getMsgs(cid); ms.push(m); saveMsgs(cid); renderMsgs();
+  const ms = await getMsgs(cid); ms.push(m); saveMsgs(cid); renderMsgs(true);
   if (online) await wire(m);
 }
 $('#send').onclick = async () => {
@@ -579,8 +666,8 @@ async function getMedia(video, facing = 'user') {
   });
 }
 function callUI(show, name) {
-  $('#call').classList.toggle('hidden', !show);
-  if (name != null) { $('#cn2').textContent = name; $('#cav2').textContent = initials(name); }
+  $('#call').classList.toggle('on', show);
+  if (name != null) { $('#cn2').textContent = name; paintAv($('#cav2'), name); }
 }
 const setCallState = t => $('#cs2').textContent = t;
 function updateRemoteView() {
@@ -599,6 +686,7 @@ function ring(on) {
     beep(); ringTimer = setInterval(beep, 1500);
   } catch {}
 }
+const connName = () => (contacts.find(c => conn && c.id === conn.cid) || {}).name || '';
 async function attachLocal() {
   if (!call || !call.stream) return;
   call.stream.getTracks().forEach(t => call.senders.push(pc.addTrack(t, call.stream)));
@@ -612,17 +700,16 @@ async function startCall(video) {
   try {
     const stream = await getMedia(video);
     call = { video, stream, senders: [], answered: false, incoming: false };
-    callUI(true, contacts.find(c => c.id === conn.cid).name); setCallState('Calling…');
+    callUI(true, connName()); $('#cinfo').classList.remove('hidden'); setCallState('Calling…');
     $('#bAcc').classList.add('hidden'); ring(true);
     sendRaw({ t: 'call', video });
-    const wait = setTimeout(() => { if (call && !call.answered) { toast('No answer'); sendRaw({ t: 'end' }); endCallLocal(); } }, 45000);
-    call.wait = wait;
+    call.wait = setTimeout(() => { if (call && !call.answered) { toast('No answer'); sendRaw({ t: 'end' }); endCallLocal(); } }, 45000);
   } catch { toast('Camera/microphone permission needed'); call = null; }
 }
 function onIncomingCall(video) {
   if (call) return sendRaw({ t: 'call-no' });
   call = { video, stream: null, senders: [], answered: false, incoming: true };
-  callUI(true, contacts.find(c => c.id === conn.cid).name); setCallState('Incoming ' + (video ? 'video' : 'audio') + ' call…');
+  callUI(true, connName()); $('#cinfo').classList.remove('hidden'); setCallState('Incoming ' + (video ? 'video' : 'audio') + ' call…');
   $('#bAcc').classList.remove('hidden'); ring(true);
 }
 $('#bAcc').onclick = async () => {
