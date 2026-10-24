@@ -922,17 +922,28 @@ async function purge() {
 }
 setInterval(() => { if (KEY) purge(); }, 30000);
 
-/* ---------- Back button / swipe: go back inside the app, do not leave it ---------- */
+/* ---------- Back button / swipe: go back inside the app; ask before leaving ---------- */
 (() => {
-  let exitArm = 0;
-  history.replaceState({ sc: 0 }, ''); history.pushState({ sc: 1 }, '');
+  const push = () => { try { if (!(history.state && history.state.sc === 1)) history.pushState({ sc: 1 }, ''); } catch {} };
+  history.replaceState({ sc: 0 }, ''); push();
+  // browsers only keep a history entry that was added after a tap, so top it up on every tap
+  addEventListener('pointerdown', push, true); addEventListener('touchstart', push, { capture: true, passive: true });
+  let leaving = false;
   addEventListener('popstate', () => {
-    const keep = () => history.pushState({ sc: 1 }, '');
-    if ($('#call').classList.contains('on')) return keep();
-    if ($('#modal').classList.contains('show')) { closeSheet(); return keep(); }
-    if (document.body.classList.contains('chat-open')) { showList(); return keep(); }
-    if (Date.now() < exitArm) { history.back(); return; }
-    exitArm = Date.now() + 2000; toast('Swipe back again to exit'); keep();
+    if (leaving) return;
+    if ($('#call').classList.contains('on')) return push();
+    if ($('#modal').classList.contains('show')) { closeSheet(); return push(); }
+    if (document.body.classList.contains('chat-open')) { showList(); return push(); }
+    push();
+    openSheet(sh => sh.append(el('h2', { textContent: 'Exit SecureChat?' }),
+      el('p', { textContent: 'You will stop receiving calls until you open the app again.' }),
+      el('div', { className: 'btns' },
+        el('button', { textContent: 'Stay', onclick: closeSheet }),
+        el('button', { className: 'danger', textContent: 'Exit', onclick: () => {
+          leaving = true; closeSheet(); lockNow && lockNow();
+          try { window.close(); } catch {}
+          setTimeout(() => history.go(-Math.max(1, history.length - 1)), 50);
+        } }))));
   });
 })();
 
