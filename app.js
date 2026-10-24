@@ -14,7 +14,7 @@ const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')
 const hex = u8 => [...u8].map(x => x.toString(16).padStart(2, '0')).join('');
 
 /* ---------- look & feel (not secret, so kept plainly to style the login page too) ---------- */
-const UI_DEFAULT = { theme: 'auto', accent: 'blue', fs: 16, wall: 'aurora', bubble: 'round', motion: true, ring: true, vib: true };
+const UI_DEFAULT = { vbright: 1.15, theme: 'auto', accent: 'blue', fs: 16, wall: 'aurora', bubble: 'round', motion: true, ring: true, vib: true };
 let UI = Object.assign({}, UI_DEFAULT, (() => { try { return JSON.parse(localStorage.getItem('sc_ui') || '{}'); } catch { return {}; } })());
 const mq = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : null;
 function applyUI() {
@@ -80,7 +80,7 @@ async function unsealWith(key, buf) {
 const seal = obj => sealWith(KEY, obj), unseal = buf => unsealWith(KEY, buf);
 
 /* ---------- state ---------- */
-const DEFAULTS = () => ({ name: '', stun: true, noStore: true, lockMin: 5, myId: '', turn: null, relayOnly: false });
+const DEFAULTS = () => ({ name: '', stun: true, noStore: true, keepSec: 0, lockMin: 5, myId: '', turn: null, relayOnly: false });
 let contacts = [];                 // {id,name,ttl,pid,ps}
 let settings = DEFAULTS();
 const msgsCache = {};              // cid -> [msg]
@@ -95,6 +95,8 @@ async function loadAll() {
   contacts = list.filter(c => c.ps);               // drop half-finished pairings
   const s = await kvGet('settings').then(b => b ? unseal(b) : null);
   settings = Object.assign(DEFAULTS(), s || {});
+  if (s && s.keepSec === undefined) settings.keepSec = s.noStore === false ? -1 : 0;
+  settings.noStore = settings.keepSec === 0;
   if (!settings.myId) { settings.myId = b64u(crypto.getRandomValues(new Uint8Array(16))); await saveSettings(); }
 }
 const saveContacts = async () => { if (KEY) await kvSet('contacts', await seal(contacts.filter(c => c.ps))); };
@@ -202,7 +204,7 @@ async function renderList() {
   }
 }
 async function openChat(cid) {
-  curChat = cid; unread[cid] = 0;
+  await purge(); curChat = cid; unread[cid] = 0;
   const c = contacts.find(x => x.id === cid); if (!c) return;
   $('#cname').textContent = c.name; paintAv($('#cav'), c.name);
   updateStatus(); await renderMsgs(false);
@@ -302,6 +304,12 @@ $('#openSettings').onclick = () => openSheet(sh => {
   const tu = el('input', { value: (settings.turn && settings.turn.url) || '', placeholder: 'turn:your-server.com:3478', autocapitalize: 'off', autocorrect: 'off' });
   const tn = el('input', { value: (settings.turn && settings.turn.user) || '', placeholder: 'Username', autocapitalize: 'off' });
   const tp = el('input', { value: (settings.turn && settings.turn.pass) || '', placeholder: 'Password', type: 'password' });
+  const keepSel = el('select', {}, ...[[0, "Don't save"], [3600, '1 hour'], [86400, '1 day'], [604800, '1 week'], [-1, 'Forever']].map(([v, t]) => el('option', { value: v, textContent: t, selected: settings.keepSec === v })));
+  keepSel.onchange = async () => {
+    const was = settings.noStore; settings.keepSec = +keepSel.value; settings.noStore = settings.keepSec === 0; await saveSettings();
+    if (settings.noStore) for (const c of contacts) await kvDel('m:' + c.id);
+    else { if (was) for (const c of contacts) if (msgsCache[c.id]) saveMsgs(c.id); await purge(); }
+  };
   const lm = el('select', {}, ...[[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Never']].map(([v, t]) => el('option', { value: v, textContent: t, selected: settings.lockMin === v })));
   lm.onchange = async () => { settings.lockMin = +lm.value; await saveSettings(); };
   const accents = [['blue', 'linear-gradient(135deg,#2f80ff,#38c6ff)'], ['purple', 'linear-gradient(135deg,#7c5cff,#c06bff)'], ['green', 'linear-gradient(135deg,#12b86a,#4be0a0)'], ['pink', 'linear-gradient(135deg,#ff4f8b,#ff8a5c)'], ['orange', 'linear-gradient(135deg,#ff8a00,#ffc23d)'], ['teal', 'linear-gradient(135deg,#0aa8b8,#3de0d0)']];
@@ -313,14 +321,13 @@ $('#openSettings').onclick = () => openSheet(sh => {
       setRow('Text size', null, segCtl([[14, 'Small'], [16, 'Medium'], [18, 'Large']], UI.fs, v => { UI.fs = v; saveUI(); }), true),
       setRow('Chat background', null, swatchCtl(walls, UI.wall, v => { UI.wall = v; saveUI(); }, 'wall'), true),
       setRow('Bubble style', null, segCtl([['round', 'Rounded'], ['tail', 'Classic']], UI.bubble, v => { UI.bubble = v; saveUI(); }), true),
+      setRow('Video brightness', 'Makes dim video calls clearer', segCtl([[1, 'Normal'], [1.15, 'Bright'], [1.3, 'Brighter']], UI.vbright, v => { UI.vbright = v; saveUI(); applyBright(); }), true),
       setRow('Smooth animations', 'Turn off for a plainer, faster feel', toggleCtl(UI.motion, v => { UI.motion = v; saveUI(); }))),
     grpT('Sound and alerts'),
     grp(setRow('Call ringtone', null, toggleCtl(UI.ring, v => { UI.ring = v; saveUI(); })),
       setRow('Vibrate', 'For new messages and calls', toggleCtl(UI.vib, v => { UI.vib = v; saveUI(); buzz(40); }))),
     grpT('Privacy'),
-    grp(setRow('Do not save messages', 'Chats stay in memory only and vanish when the app locks or closes.', toggleCtl(settings.noStore, async v => {
-        settings.noStore = v; await saveSettings(); if (v) for (const c of contacts) await kvDel('m:' + c.id);
-      })),
+    grp(setRow('Keep messages', 'Saved on this phone, encrypted. Older ones are erased automatically. "Don\'t save" keeps chats in memory only.', keepSel),
       setRow('Auto-lock after leaving', null, lm)),
     grpT('Profile'),
     grp(setRow('Your name', 'Friends see this', nm, true)),
@@ -773,10 +780,25 @@ $('#mic').onclick = async () => {
 /* ---------- calls ---------- */
 let call = null, callTimer = null, ringTimer = null, actx = null, wakeLock = null;
 async function getMedia(video, facing = 'user') {
-  return navigator.mediaDevices.getUserMedia({
+  const st = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     video: video ? { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } } : false
   });
+  st.getVideoTracks().forEach(brightenTrack); return st;
+}
+/* Ask the camera itself for a brighter picture (only where the phone allows it) */
+function brightenTrack(t) {
+  try {
+    const cap = t.getCapabilities ? t.getCapabilities() : {}, adv = [];
+    if (cap.exposureMode && cap.exposureMode.includes('continuous')) adv.push({ exposureMode: 'continuous' });
+    if (cap.exposureCompensation && UI.vbright > 1) { const e = cap.exposureCompensation; adv.push({ exposureCompensation: e.min + (e.max - e.min) * (UI.vbright > 1.2 ? 0.8 : 0.65) }); }
+    if (adv.length) t.applyConstraints({ advanced: adv }).catch(() => {});
+  } catch {}
+}
+function applyBright() {
+  const f = UI.vbright > 1 ? `brightness(${UI.vbright}) contrast(1.05) saturate(1.05)` : '';
+  ['#rv', '#lv'].forEach(q => { const e = $(q); if (e) e.style.filter = f; });
+  if (call && call.stream) call.stream.getVideoTracks().forEach(brightenTrack);
 }
 function callUI(show, name) {
   $('#call').classList.toggle('on', show); if (!show) document.body.classList.remove('vcall');
@@ -804,7 +826,7 @@ async function attachLocal() {
   if (!call || !call.stream) return;
   call.stream.getTracks().forEach(t => call.senders.push(pc.addTrack(t, call.stream)));
   const hasV = call.stream.getVideoTracks().length > 0;
-  $('#lv').srcObject = call.stream; $('#lv').classList.toggle('hidden', !hasV);
+  $('#lv').srcObject = call.stream; $('#lv').classList.toggle('hidden', !hasV); applyBright();
   $('#bCam').classList.toggle('off', !hasV); $('#bCam').innerHTML = ic(hasV ? 'video' : 'videooff');
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
@@ -863,16 +885,29 @@ $('#bCam').onclick = async () => {
   }
   t.enabled = !t.enabled; $('#bCam').classList.toggle('off', !t.enabled); $('#lv').classList.toggle('hidden', !t.enabled); $('#bCam').innerHTML = ic(t.enabled ? 'video' : 'videooff');
 };
-let facing = 'user';
+let facing = 'user', flipping = false;
 $('#bFlip').onclick = async () => {
   if (!call || !call.stream) return; const old = call.stream.getVideoTracks()[0]; if (!old) return;
-  facing = facing === 'user' ? 'environment' : 'user';
+  if (flipping) return; flipping = true;
+  const prev = facing, next = facing === 'user' ? 'environment' : 'user', was = old.enabled;
+  const sender = pc.getSenders().find(x => x.track === old);
+  const open = async f => { // most phones can open only one camera at a time, so release the old one first
+    const tries = [{ facingMode: { exact: f } }, { facingMode: { ideal: f } }];
+    for (const v of tries) { try { return (await navigator.mediaDevices.getUserMedia({ video: { ...v, width: { ideal: 1280 }, height: { ideal: 720 } } })).getVideoTracks()[0]; } catch {} }
+    return null;
+  };
   try {
-    const s = await getMedia(true, facing), nt = s.getVideoTracks()[0]; s.getAudioTracks().forEach(a => a.stop());
-    const sender = pc.getSenders().find(x => x.track === old); if (sender) await sender.replaceTrack(nt);
-    call.stream.removeTrack(old); old.stop(); call.stream.addTrack(nt); $('#lv').srcObject = call.stream;
+    old.stop(); let nt = await open(next), used = next;
+    if (!nt) { nt = await open(prev); used = prev; }
+    if (!nt) throw new Error('no camera');
+    nt.enabled = was; brightenTrack(nt);
+    if (sender) await sender.replaceTrack(nt);
+    call.stream.removeTrack(old); call.stream.addTrack(nt); facing = used;
+    $('#lv').srcObject = null; $('#lv').srcObject = call.stream;
     $('#lv').style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
+    if (used === prev) toast('This phone cannot switch camera');
   } catch { toast('Cannot switch camera'); }
+  flipping = false;
 };
 $('#aCall').onclick = () => startCall(false);
 $('#vCall').onclick = () => startCall(true);
@@ -880,12 +915,26 @@ $('#vCall').onclick = () => startCall(true);
 /* ---------- disappearing messages ---------- */
 async function purge() {
   for (const c of contacts) {
-    if (!c.ttl) continue; const ms = await getMsgs(c.id), before = ms.length, cut = Date.now() - c.ttl * 1000;
+    const lim = [c.ttl, settings.keepSec].filter(x => x > 0); if (!lim.length) continue; const ms = await getMsgs(c.id), before = ms.length, cut = Date.now() - Math.min(...lim) * 1000;
     for (let i = ms.length - 1; i >= 0; i--) if (ms[i].ts < cut) ms.splice(i, 1);
     if (ms.length !== before) { saveMsgs(c.id); if (curChat === c.id) renderMsgs(); }
   }
 }
 setInterval(() => { if (KEY) purge(); }, 30000);
+
+/* ---------- Back button / swipe: go back inside the app, do not leave it ---------- */
+(() => {
+  let exitArm = 0;
+  history.replaceState({ sc: 0 }, ''); history.pushState({ sc: 1 }, '');
+  addEventListener('popstate', () => {
+    const keep = () => history.pushState({ sc: 1 }, '');
+    if ($('#call').classList.contains('on')) return keep();
+    if ($('#modal').classList.contains('show')) { closeSheet(); return keep(); }
+    if (document.body.classList.contains('chat-open')) { showList(); return keep(); }
+    if (Date.now() < exitArm) { history.back(); return; }
+    exitArm = Date.now() + 2000; toast('Swipe back again to exit'); keep();
+  });
+})();
 
 /* ---------- boot ---------- */
 paintIcons();
