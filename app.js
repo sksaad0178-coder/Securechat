@@ -13,6 +13,37 @@ const b64u = u8 => btoa(String.fromCharCode(...u8)).replace(/\+/g, '-').replace(
 const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
 const hex = u8 => [...u8].map(x => x.toString(16).padStart(2, '0')).join('');
 
+/* ---------- look & feel (not secret, so kept plainly to style the login page too) ---------- */
+const UI_DEFAULT = { theme: 'auto', accent: 'blue', fs: 16, wall: 'aurora', bubble: 'round', motion: true, ring: true, vib: true };
+let UI = Object.assign({}, UI_DEFAULT, (() => { try { return JSON.parse(localStorage.getItem('sc_ui') || '{}'); } catch { return {}; } })());
+const mq = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : null;
+function applyUI() {
+  const dark = UI.theme === 'dark' || (UI.theme === 'auto' && mq && mq.matches), h = document.documentElement;
+  h.dataset.theme = dark ? 'dark' : 'light'; h.dataset.accent = UI.accent; h.dataset.wall = UI.wall; h.dataset.bubble = UI.bubble; h.dataset.motion = UI.motion ? 'on' : 'off';
+  h.style.setProperty('--fs', UI.fs + 'px');
+  const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = dark ? '#07090f' : '#f3f5fa';
+}
+function saveUI() { try { localStorage.setItem('sc_ui', JSON.stringify(UI)); } catch {} applyUI(); }
+if (mq) { if (mq.addEventListener) mq.addEventListener('change', applyUI); else if (mq.addListener) mq.addListener(applyUI); }
+applyUI();
+const ICONS = {
+  back: '<path d="M15 5l-7 7 7 7"/>', plus: '<path d="M12 5v14M5 12h14"/>',
+  sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="3"/>',
+  videooff: '<path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10M1 1l22 22"/>',
+  more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
+  clip: '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+  mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>',
+  micoff: '<path d="M1 1l22 22M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6M17 16.95A7 7 0 0 1 5 12v-2M19 10v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"/>',
+  send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>', stop: '<rect x="6" y="6" width="12" height="12" rx="3"/>',
+  flip: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>'
+};
+const ic = n => '<svg class="i" viewBox="0 0 24 24">' + ICONS[n] + '</svg>';
+const paintIcons = (root = document) => root.querySelectorAll('[data-ic]').forEach(b => { b.innerHTML = ic(b.dataset.ic); });
+const buzz = p => { try { if (UI.vib && navigator.vibrate) navigator.vibrate(p); } catch {} };
+
 /* ---------- storage (IndexedDB, encrypted values) ---------- */
 const idb = new Promise((res, rej) => {
   const r = indexedDB.open('securechat', 1);
@@ -91,22 +122,23 @@ function toast(t) {
 
 /* ---------- lock screen ---------- */
 let failCount = 0, lockTimer = null;
+function shakeErr(e, m) { e.textContent = m; e.classList.remove('shake'); void e.offsetWidth; e.classList.add('shake'); }
 async function initLock() {
   const check = await kvGet('check');
   const first = !check;
   $('#lockHelp').textContent = first
-    ? 'Welcome. Choose a strong passphrase (8+ characters). It protects everything on this phone. If you forget it, nobody can recover it.'
-    : 'Enter your passphrase to unlock.';
-  $('#lockBtn').textContent = first ? 'Create' : 'Unlock';
+    ? 'Create a private passphrase (8+ characters). It protects everything on this phone. If you forget it, nobody can recover it.'
+    : 'Welcome back. Enter your passphrase to unlock.';
+  $('#lockBtn').textContent = first ? 'Get started' : 'Unlock';
   $('#pin2').classList.toggle('hidden', !first);
   $('#uname').classList.toggle('hidden', !first);
   $('#lockBtn').onclick = async () => {
     const p = $('#pin').value, err = $('#lockErr'); err.textContent = '';
     try {
       if (first) {
-        if (!$('#uname').value.trim()) return err.textContent = 'Please enter your name.';
-        if (p.length < 8) return err.textContent = 'Use at least 8 characters.';
-        if (p !== $('#pin2').value) return err.textContent = 'Passphrases do not match.';
+        if (!$('#uname').value.trim()) return shakeErr(err, 'Please enter your name.');
+        if (p.length < 8) return shakeErr(err, 'Use at least 8 characters.');
+        if (p !== $('#pin2').value) return shakeErr(err, 'Passphrases do not match.');
         const salt = crypto.getRandomValues(new Uint8Array(16));
         localStorage.setItem('sc_salt', btoa(String.fromCharCode(...salt)));
         KEY = await deriveKey(p, salt);
@@ -115,7 +147,7 @@ async function initLock() {
         if (failCount >= 3) await sleep(Math.min(30000, 2 ** failCount * 1000));
         const salt = Uint8Array.from(atob(localStorage.getItem('sc_salt')), c => c.charCodeAt(0));
         KEY = await deriveKey(p, salt);
-        try { await unseal(check); } catch { KEY = null; failCount++; return err.textContent = 'Wrong passphrase.'; }
+        try { await unseal(check); } catch { KEY = null; failCount++; return shakeErr(err, 'Wrong passphrase.'); }
       }
       failCount = 0; $('#pin').value = $('#pin2').value = '';
       await loadAll();
@@ -146,7 +178,7 @@ const initials = n => (n || '?').trim().slice(0, 1).toUpperCase();
 function paintAv(elm, name) {
   elm.textContent = initials(name);
   let h = 0; for (const ch of name || '?') h = (h * 31 + ch.charCodeAt(0)) % 360;
-  elm.style.background = `hsl(${h} 45% 48%)`;
+  elm.style.background = `linear-gradient(135deg,hsl(${h} 75% 62%),hsl(${(h + 35) % 360} 70% 46%))`;
 }
 const isOn = cid => !!(conn && conn.cid === cid && dc && dc.readyState === 'open');
 async function showList() {
@@ -154,11 +186,11 @@ async function showList() {
 }
 async function renderList() {
   const box = $('#chats'); box.innerHTML = '';
-  if (!contacts.length) { box.innerHTML = '<div class="empty">No friends yet.<br><br>Tap <b>＋</b> to add one. You do this only once per friend. After that, just tap their name to connect.</div>'; return; }
+  if (!contacts.length) { box.innerHTML = '<div class="empty"><div class="orb"><svg viewBox="0 0 64 64"><path d="M14 12h36a10 10 0 0 1 10 10v18a10 10 0 0 1-10 10H34l-11 9c-1.4 1.1-3 .2-3-1.6V50h-6A10 10 0 0 1 4 40V22A10 10 0 0 1 14 12z" fill="#fff" transform="translate(0 -2)"/><rect x="25.5" y="21" width="13" height="11" rx="3" fill="#2a63ff"/><path d="M28.2 21v-3a3.8 3.8 0 0 1 7.6 0v3" fill="none" stroke="#2a63ff" stroke-width="2.6" stroke-linecap="round"/></svg></div><b>No friends yet</b><br>Tap <b>+</b> to add one. You do this only once per friend. After that, just tap their name to connect.</div>'; return; }
   let i = 0;
   for (const c of contacts) {
     const ms = await getMsgs(c.id), last = ms[ms.length - 1];
-    const r = document.createElement('div'); r.className = 'row'; r.style.animationDelay = (i++ * 40) + 'ms';
+    const r = document.createElement('div'); r.className = 'row'; r.style.animationDelay = (i++ * 60) + 'ms';
     r.innerHTML = '<div class="av"></div><div class="grow"><div class="n"></div><div class="l"></div></div><span class="badge hidden"></span><span class="dot"></span>';
     paintAv(r.querySelector('.av'), c.name);
     r.querySelector('.n').textContent = c.name;
@@ -180,33 +212,44 @@ async function openChat(cid) {
 function updateStatus() {
   if (curChat === null) return;
   const on = isOn(curChat);
-  $('#cstat').textContent = on ? 'online · encrypted' : (attempt && attempt.cid === curChat ? 'connecting…' : 'offline — waiting for your friend to open the app');
+  $('#cstat').textContent = on ? 'online' : (attempt && attempt.cid === curChat ? 'connecting…' : 'offline');
+  $('#cstat').classList.toggle('live', on);
   $('#aCall').disabled = $('#vCall').disabled = !on;
 }
-const tickOf = s => s === 'delivered' ? '✓✓' : s === 'sent' ? '✓' : s === 'pending' ? '⏳' : '';
+const tickOf = s => s === 'delivered' ? '✓✓' : s === 'sent' ? '✓' : s === 'pending' ? '…' : '';
 function bubble(m) {
-  const d = document.createElement('div'); d.className = 'b ' + (m.from === 'me' ? 'me' : 'them');
+  const d = document.createElement('div'); d.className = 'b ' + (m.from === 'me' ? 'me' : 'them'); d.dataset.id = m.id;
   if (m.type === 'img') { const i = new Image(); i.src = m.data; d.append(i); }
   else if (m.type === 'voice') { const a = document.createElement('audio'); a.controls = true; a.src = m.data; d.append(a); }
-  else if (m.type === 'file') { const a = document.createElement('a'); a.href = m.data; a.download = m.name || 'file'; a.textContent = '📎 ' + (m.name || 'file'); d.append(a); }
+  else if (m.type === 'file') { const a = document.createElement('a'); a.href = m.data; a.download = m.name || 'file'; a.textContent = (m.name || 'file'); d.append(a); }
   if (m.text) { const p = document.createElement('div'); p.textContent = m.text; d.append(p); }
   const meta = document.createElement('div'); meta.className = 'meta';
-  meta.textContent = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + (m.from === 'me' ? ' ' + tickOf(m.status) : '');
-  const del = document.createElement('button'); del.textContent = '🗑'; del.title = 'Delete';
+  const tm = document.createElement('span'); tm.className = 'tm';
+  tm.textContent = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + (m.from === 'me' ? ' ' + tickOf(m.status) : '');
+  const del = document.createElement('button'); del.innerHTML = ic('trash'); del.title = 'Delete';
   del.onclick = () => { if (confirm('Delete this message' + (m.from === 'me' && conn ? ' for everyone?' : '?'))) deleteMsg(m.id, true); };
-  meta.append(del); d.append(meta); return d;
+  meta.append(tm, del); d.append(meta); return d;
+}
+function updateTick(id, status) {
+  const n = $('#msgs').querySelector('[data-id="' + id + '"] .tm'); if (!n) return;
+  n.textContent = n.textContent.replace(/\s*(✓✓|✓|…)$/, '') + ' ' + tickOf(status);
 }
 async function renderMsgs(animLast) {
   if (!curChat) return;
-  const box = $('#msgs'), ms = await getMsgs(curChat); box.innerHTML = '';
-  for (const m of ms) box.append(bubble(m));
-  if (animLast && box.lastChild) box.lastChild.classList.add('pop');
-  box.scrollTop = box.scrollHeight;
+  const box = $('#msgs'), ms = await getMsgs(curChat);
+  if (animLast && box.dataset.cid === curChat && box.children.length === ms.length - 1 && ms.length) {
+    const b = bubble(ms[ms.length - 1]); b.classList.add('pop'); box.append(b);
+    box.scrollTo({ top: box.scrollHeight, behavior: UI.motion ? 'smooth' : 'auto' }); return;
+  }
+  box.innerHTML = ''; box.dataset.cid = curChat;
+  const frag = document.createDocumentFragment(); for (const m of ms) frag.append(bubble(m)); box.append(frag);
+  box.style.scrollBehavior = 'auto'; box.scrollTop = box.scrollHeight; box.style.scrollBehavior = '';
 }
 async function deleteMsg(id, remote) {
   const cid = curChat; if (!cid) return;
   const ms = await getMsgs(cid), i = ms.findIndex(m => m.id === id);
-  if (i < 0) return; const m = ms[i]; ms.splice(i, 1); saveMsgs(cid); renderMsgs();
+  if (i < 0) return; const m = ms[i]; ms.splice(i, 1); saveMsgs(cid);
+  const node = $('#msgs').querySelector('[data-id="' + id + '"]'); if (node) { node.classList.add('gone'); setTimeout(() => node.remove(), 280); }
   if (remote && m.from === 'me') sendRaw({ t: 'del', id });
 }
 /* iOS-style swipe from the left edge to go back */
@@ -237,26 +280,53 @@ $('#newChat').onclick = () => openSheet(sh => {
     el('button', { className: 'pri', textContent: 'Invite a friend', onclick: inviteFlow }),
     el('button', { textContent: 'I have a code or link', onclick: joinAsk }));
 });
+function segCtl(opts, cur, on) {
+  const d = el('div', { className: 'seg' });
+  opts.forEach(([v, t]) => { const b = el('button', { textContent: t, className: v === cur ? 'on' : '' }); b.onclick = () => { [...d.children].forEach(x => x.classList.remove('on')); b.classList.add('on'); on(v); }; d.append(b); });
+  return d;
+}
+function swatchCtl(items, cur, on, cls) {
+  const d = el('div', { className: 'sw ' + (cls || '') });
+  items.forEach(([v, bg, label]) => { const b = el('button', { className: v === cur ? 'on' : '', title: label || v }); b.style.background = bg; b.onclick = () => { [...d.children].forEach(x => x.classList.remove('on')); b.classList.add('on'); on(v); }; d.append(b); });
+  return d;
+}
+function toggleCtl(val, on) { const w = el('label', { className: 'sw-s' }), i = el('input', { type: 'checkbox', checked: !!val }); i.onchange = () => on(i.checked); w.append(i, el('i')); return w; }
+function setRow(t, d, ctl, col) {
+  const r = el('div', { className: 'srow' + (col ? ' col' : '') }), lab = el('div', {}, el('div', { className: 't', textContent: t }));
+  if (d) lab.append(el('div', { className: 'd', textContent: d })); r.append(lab, ctl); return r;
+}
+const grp = (...rows) => el('div', { className: 'group' }, ...rows);
+const grpT = t => el('div', { className: 'grp-t', textContent: t });
 $('#openSettings').onclick = () => openSheet(sh => {
   const nm = el('input', { value: settings.name, placeholder: 'Your name' });
-  const ns = el('input', { type: 'checkbox', checked: settings.noStore });
-  const st = el('input', { type: 'checkbox', checked: settings.stun });
   const lm = el('select', {}, ...[[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Never']].map(([v, t]) => el('option', { value: v, textContent: t, selected: settings.lockMin === v })));
+  lm.onchange = async () => { settings.lockMin = +lm.value; await saveSettings(); };
+  const accents = [['blue', 'linear-gradient(135deg,#2f80ff,#38c6ff)'], ['purple', 'linear-gradient(135deg,#7c5cff,#c06bff)'], ['green', 'linear-gradient(135deg,#12b86a,#4be0a0)'], ['pink', 'linear-gradient(135deg,#ff4f8b,#ff8a5c)'], ['orange', 'linear-gradient(135deg,#ff8a00,#ffc23d)'], ['teal', 'linear-gradient(135deg,#0aa8b8,#3de0d0)']];
+  const walls = [['none', 'var(--bg)', 'Plain'], ['aurora', 'linear-gradient(135deg,#bcd7ff,#ffd6f0)', 'Aurora'], ['dots', 'radial-gradient(#9aa6bf 1.2px,#eef1f8 1.4px) 0 0/10px 10px', 'Dots'], ['sand', '#efe9dd', 'Sand'], ['night', 'linear-gradient(180deg,#0b1030,#1b0f3d)', 'Night']];
   sh.append(el('h2', { textContent: 'Settings' }),
-    el('p', { textContent: 'Your name (shown to friends)' }), nm,
-    el('label', {}, ns, el('span', { textContent: 'Do not save messages on this phone. Chats live in memory only and disappear when the app locks or closes. Your friends stay saved.' })),
-    el('p', { textContent: 'Lock the app after leaving it for' }), lm,
-    el('label', {}, st, el('span', { textContent: 'Use a public STUN server so you can connect over the internet. It only learns your IP address, never your content.' })),
-    el('button', { className: 'pri', textContent: 'Save', onclick: async () => {
-      const turnedOn = ns.checked && !settings.noStore;
-      settings.name = nm.value.trim().slice(0, 40) || settings.name; settings.noStore = ns.checked; settings.stun = st.checked; settings.lockMin = +lm.value;
-      await saveSettings();
-      if (turnedOn) for (const c of contacts) await kvDel('m:' + c.id);
-      closeSheet(); toast('Saved');
-    } }),
-    el('button', { textContent: '💾 Back up my friends', onclick: backup }),
-    el('button', { textContent: '♻️ Restore from backup', onclick: () => $('#bfile').click() }),
-    el('button', { textContent: '🔒 Lock now', onclick: () => { closeSheet(); setTimeout(lockNow, 300); } }),
+    grpT('Appearance'),
+    grp(setRow('Theme', null, segCtl([['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']], UI.theme, v => { UI.theme = v; saveUI(); }), true),
+      setRow('Accent colour', null, swatchCtl(accents, UI.accent, v => { UI.accent = v; saveUI(); }), true),
+      setRow('Text size', null, segCtl([[14, 'Small'], [16, 'Medium'], [18, 'Large']], UI.fs, v => { UI.fs = v; saveUI(); }), true),
+      setRow('Chat background', null, swatchCtl(walls, UI.wall, v => { UI.wall = v; saveUI(); }, 'wall'), true),
+      setRow('Bubble style', null, segCtl([['round', 'Rounded'], ['tail', 'Classic']], UI.bubble, v => { UI.bubble = v; saveUI(); }), true),
+      setRow('Smooth animations', 'Turn off for a plainer, faster feel', toggleCtl(UI.motion, v => { UI.motion = v; saveUI(); }))),
+    grpT('Sound and alerts'),
+    grp(setRow('Call ringtone', null, toggleCtl(UI.ring, v => { UI.ring = v; saveUI(); })),
+      setRow('Vibrate', 'For new messages and calls', toggleCtl(UI.vib, v => { UI.vib = v; saveUI(); buzz(40); }))),
+    grpT('Privacy'),
+    grp(setRow('Do not save messages', 'Chats stay in memory only and vanish when the app locks or closes.', toggleCtl(settings.noStore, async v => {
+        settings.noStore = v; await saveSettings(); if (v) for (const c of contacts) await kvDel('m:' + c.id);
+      })),
+      setRow('Auto-lock after leaving', null, lm)),
+    grpT('Profile'),
+    grp(setRow('Your name', 'Friends see this', nm, true)),
+    grpT('Connection'),
+    grp(setRow('Use a public STUN server', 'Needed to connect over the internet. It only sees your IP address, never your content.', toggleCtl(settings.stun, async v => { settings.stun = v; await saveSettings(); }))),
+    el('button', { className: 'pri', textContent: 'Done', onclick: async () => { settings.name = nm.value.trim().slice(0, 40) || settings.name; await saveSettings(); closeSheet(); toast('Saved'); } }),
+    el('button', { textContent: 'Back up my friends', onclick: backup }),
+    el('button', { textContent: 'Restore from backup', onclick: () => $('#bfile').click() }),
+    el('button', { textContent: 'Lock now', onclick: () => { closeSheet(); setTimeout(lockNow, 300); } }),
     el('button', { className: 'danger', textContent: 'Erase everything on this phone', onclick: async () => {
       if (!confirm('Erase ALL friends, chats and your passphrase from this phone?')) return;
       closePeer(); await kvClear(); localStorage.clear(); location.reload();
@@ -286,7 +356,7 @@ $('#cMenu').onclick = () => openSheet(sh => {
   ttl.onchange = async () => { c.ttl = +ttl.value; await saveContacts(); sendRaw({ t: 'ttl', v: c.ttl }); purge(); toast('Disappearing messages updated'); };
   sh.append(el('h2', { textContent: c.name }));
   if (!isOn(c.id)) sh.append(el('button', { className: 'pri', textContent: 'Connect now', onclick: () => { closeSheet(); attempt = null; reach(c.id); } }));
-  else sh.append(el('button', { textContent: '🔐 Verify safety code', onclick: showSafety }));
+  else sh.append(el('button', { textContent: 'Verify safety code', onclick: showSafety }));
   sh.append(el('p', { textContent: 'Disappearing messages' }), ttl,
     el('button', { textContent: 'Rename', onclick: async () => { const n = prompt('Name', c.name); if (n) { c.name = n.trim().slice(0, 40); await saveContacts(); closeSheet(); $('#cname').textContent = c.name; paintAv($('#cav'), c.name); } } }),
     el('button', { className: 'danger', textContent: 'Remove friend', onclick: async () => {
@@ -417,7 +487,7 @@ async function onWire(o) {
     }
     case 'msg': incoming[o.id] = { meta: o, parts: [] }; if (!o.n) finishIncoming(o.id); break;
     case 'chunk': { const x = incoming[o.id]; if (!x) break; x.parts.push(o.d); if (x.parts.length >= x.meta.n) finishIncoming(o.id); break; }
-    case 'ack': { const ms = await getMsgs(cid); const m = ms.find(m => m.id === o.id); if (m) { m.status = 'delivered'; saveMsgs(cid); if (curChat === cid) renderMsgs(); } break; }
+    case 'ack': { const ms = await getMsgs(cid); const m = ms.find(m => m.id === o.id); if (m) { m.status = 'delivered'; saveMsgs(cid); if (curChat === cid) updateTick(m.id, 'delivered'); } break; }
     case 'typing': if (curChat === cid) { $('#typing').textContent = 'typing…'; clearTimeout(typingTimer); typingTimer = setTimeout(() => $('#typing').textContent = '', 2500); } break;
     case 'del': { const ms = await getMsgs(cid), i = ms.findIndex(m => m.id === o.id); if (i >= 0) { ms.splice(i, 1); saveMsgs(cid); if (curChat === cid) renderMsgs(); } break; }
     case 'ttl': { const c = contacts.find(x => x.id === cid); if (c && c.ttl !== o.v) { c.ttl = o.v; saveContacts(); toast('Disappearing messages: ' + (o.v ? o.v / 3600 + 'h' : 'off')); } break; }
@@ -434,6 +504,7 @@ async function finishIncoming(id) {
   const ms = await getMsgs(cid);
   ms.push({ id: o.id, from: 'them', type: o.type, text: o.text, name: o.name, mime: o.mime, ts: o.ts, data: x.parts.join('') });
   saveMsgs(cid); sendRaw({ t: 'ack', id: o.id });
+  buzz(25);
   if (curChat === cid) { renderMsgs(true); $('#typing').textContent = ''; } else { unread[cid] = (unread[cid] || 0) + 1; if (curChat === null) renderList(); }
 }
 async function onSdp(d) {
@@ -486,7 +557,7 @@ async function inviteFlow() {
   const code = genCode(), link = location.origin + location.pathname + '#j=' + normCode(code);
   pairing = true;
   openSheet(sh => {
-    const share = 'Join me on SecureChat.\nTap this link: ' + link + '\n(or open the app, tap ＋ and enter code ' + code + ')';
+    const share = 'Join me on SecureChat.\nTap this link: ' + link + '\n(or open the app, tap + and enter code ' + code + ')';
     sh.append(el('h2', { textContent: 'Invite a friend' }),
       el('div', { className: 'bigcode', textContent: code }),
       el('p', { textContent: 'Send your friend the link below. When they open it, you two connect by themselves. Keep this screen open until it says connected.' }),
@@ -649,11 +720,11 @@ $('#mic').onclick = async () => {
     rec = new MediaRecorder(st); recChunks = [];
     rec.ondataavailable = e => recChunks.push(e.data);
     rec.onstop = async () => {
-      st.getTracks().forEach(t => t.stop()); $('#mic').textContent = '🎙️';
+      st.getTracks().forEach(t => t.stop()); $('#mic').innerHTML = ic('mic'); $('#mic').classList.remove('rec');
       const blob = new Blob(recChunks, { type: rec.mimeType }); rec = null;
       if (blob.size > 50) await addMsg({ type: 'voice', mime: blob.type, data: await toDataURL(blob) });
     };
-    rec.start(); $('#mic').textContent = '⏹️'; toast('Recording… tap again to send');
+    rec.start(); $('#mic').innerHTML = ic('stop'); $('#mic').classList.add('rec'); toast('Recording… tap again to send');
   } catch { toast('Microphone not available'); }
 };
 
@@ -666,20 +737,20 @@ async function getMedia(video, facing = 'user') {
   });
 }
 function callUI(show, name) {
-  $('#call').classList.toggle('on', show);
+  $('#call').classList.toggle('on', show); if (!show) document.body.classList.remove('vcall');
   if (name != null) { $('#cn2').textContent = name; paintAv($('#cav2'), name); }
 }
 const setCallState = t => $('#cs2').textContent = t;
 function updateRemoteView() {
   const v = remoteStream && remoteStream.getVideoTracks().some(t => t.readyState === 'live' && !t.muted);
-  $('#rv').style.visibility = v ? 'visible' : 'hidden'; $('#cinfo').classList.toggle('hidden', !!v);
+  $('#rv').style.visibility = v ? 'visible' : 'hidden'; $('#cinfo').classList.toggle('hidden', !!v); document.body.classList.toggle('vcall', !!v);
 }
 function startTimer() {
   const t0 = Date.now(); clearInterval(callTimer);
   callTimer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); setCallState(String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0')); }, 1000);
 }
 function ring(on) {
-  clearInterval(ringTimer); if (!on) return;
+  clearInterval(ringTimer); $('#cinfo').classList.toggle('ringing', !!on); if (!on || !UI.ring) return;
   try {
     actx = actx || new AudioContext();
     const beep = () => { const o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = 440; g.gain.value = .08; o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + .4); };
@@ -692,7 +763,7 @@ async function attachLocal() {
   call.stream.getTracks().forEach(t => call.senders.push(pc.addTrack(t, call.stream)));
   const hasV = call.stream.getVideoTracks().length > 0;
   $('#lv').srcObject = call.stream; $('#lv').classList.toggle('hidden', !hasV);
-  $('#bCam').classList.toggle('off', !hasV);
+  $('#bCam').classList.toggle('off', !hasV); $('#bCam').innerHTML = ic(hasV ? 'video' : 'videooff');
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
 async function startCall(video) {
@@ -710,10 +781,10 @@ function onIncomingCall(video) {
   if (call) return sendRaw({ t: 'call-no' });
   call = { video, stream: null, senders: [], answered: false, incoming: true };
   callUI(true, connName()); $('#cinfo').classList.remove('hidden'); setCallState('Incoming ' + (video ? 'video' : 'audio') + ' call…');
-  $('#bAcc').classList.remove('hidden'); ring(true);
+  $('#bAcc').classList.remove('hidden'); $('#call').classList.add('rin'); ring(true); buzz([220, 120, 220, 120, 220]);
 }
 $('#bAcc').onclick = async () => {
-  if (!call || !call.incoming) return; ring(false);
+  if (!call || !call.incoming) return; ring(false); $('#call').classList.remove('rin');
   try {
     call.stream = await getMedia(call.video); call.answered = true;
     $('#bAcc').classList.add('hidden'); sendRaw({ t: 'call-ok' }); await attachLocal(); setCallState('Connected'); startTimer();
@@ -730,12 +801,12 @@ function endCallLocal() {
     try { call.senders.forEach(s => pc && pc.signalingState !== 'closed' && pc.removeTrack(s)); } catch {}
     call.stream && call.stream.getTracks().forEach(t => t.stop());
   }
-  call = null; remoteStream = null; $('#rv').srcObject = null; $('#lv').srcObject = null; callUI(false);
+  $('#call').classList.remove('rin'); call = null; remoteStream = null; $('#rv').srcObject = null; $('#rv').style.visibility = 'hidden'; $('#lv').srcObject = null; callUI(false);
   try { wakeLock && wakeLock.release(); } catch {} wakeLock = null;
 }
 $('#bMute').onclick = () => {
   if (!call || !call.stream) return; const t = call.stream.getAudioTracks()[0]; if (!t) return;
-  t.enabled = !t.enabled; $('#bMute').classList.toggle('off', !t.enabled); $('#bMute').textContent = t.enabled ? '🎤' : '🔇';
+  t.enabled = !t.enabled; $('#bMute').classList.toggle('off', !t.enabled); $('#bMute').innerHTML = ic(t.enabled ? 'mic' : 'micoff');
 };
 $('#bCam').onclick = async () => {
   if (!call || !call.stream) return;
@@ -744,11 +815,11 @@ $('#bCam').onclick = async () => {
     try {
       const s = await getMedia(true); t = s.getVideoTracks()[0]; s.getAudioTracks().forEach(a => a.stop());
       call.stream.addTrack(t); call.senders.push(pc.addTrack(t, call.stream));
-      $('#lv').srcObject = call.stream; $('#lv').classList.remove('hidden'); $('#bCam').classList.remove('off');
+      $('#lv').srcObject = call.stream; $('#lv').classList.remove('hidden'); $('#bCam').classList.remove('off'); $('#bCam').innerHTML = ic('video');
     } catch { toast('Camera not available'); }
     return;
   }
-  t.enabled = !t.enabled; $('#bCam').classList.toggle('off', !t.enabled); $('#lv').classList.toggle('hidden', !t.enabled);
+  t.enabled = !t.enabled; $('#bCam').classList.toggle('off', !t.enabled); $('#lv').classList.toggle('hidden', !t.enabled); $('#bCam').innerHTML = ic(t.enabled ? 'video' : 'videooff');
 };
 let facing = 'user';
 $('#bFlip').onclick = async () => {
@@ -775,6 +846,7 @@ async function purge() {
 setInterval(() => { if (KEY) purge(); }, 30000);
 
 /* ---------- boot ---------- */
+paintIcons();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 if (!window.isSecureContext) { document.body.innerHTML = '<div class="empty">SecureChat needs HTTPS. Open it from your https:// link.</div>'; }

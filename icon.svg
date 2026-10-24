@@ -1,1 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs><rect width="512" height="512" fill="url(#g)"/><path d="M130 150h252a24 24 0 0 1 24 24v136a24 24 0 0 1-24 24H250l-70 58v-58h-50a24 24 0 0 1-24-24V174a24 24 0 0 1 24-24z" fill="#fff"/><rect x="216" y="238" width="80" height="62" rx="10" fill="#2563eb"/><path d="M230 238v-18a26 26 0 0 1 52 0v18" fill="none" stroke="#2563eb" stroke-width="14"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><clipPath id="c"><rect width="512" height="512" rx="116"/></clipPath><g clip-path="url(#c)"><defs>
+<linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1"><stop offset="0" stop-color="#5ad1ff"/><stop offset="0.55" stop-color="#2f86ff"/><stop offset="1" stop-color="#2a4dff"/></linearGradient>
+<radialGradient id="gl" cx="0.28" cy="0.18" r="0.7"><stop offset="0" stop-color="#fff" stop-opacity="0.38"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+<linearGradient id="lk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3f93ff"/><stop offset="1" stop-color="#2a56ff"/></linearGradient>
+<filter id="sh" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#0a2a9a" flood-opacity="0.38"/></filter>
+</defs>
+<rect width="512" height="512" fill="url(#bg)"/>
+<rect width="512" height="512" fill="url(#gl)"/>
+<g transform="translate(25.6 28) scale(.9)"><g filter="url(#sh)">
+<path d="M146 132h220a56 56 0 0 1 56 56v108a56 56 0 0 1-56 56H262l-72 58c-8 6-18 1-18-9v-49h-26a56 56 0 0 1-56-56V188a56 56 0 0 1 56-56z" fill="#fff" transform="translate(-6 -8)"/>
+</g>
+<g transform="translate(-6 -8)">
+<rect x="216" y="222" width="80" height="64" rx="16" fill="url(#lk)"/>
+<path d="M233 224v-17a23 23 0 0 1 46 0v17" fill="none" stroke="url(#lk)" stroke-width="15" stroke-linecap="round"/>
+<circle cx="256" cy="251" r="8.5" fill="#fff"/><rect x="252.5" y="255" width="7" height="16" rx="3.5" fill="#fff"/>
+</g>
+</g></g></svg>
