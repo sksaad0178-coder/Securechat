@@ -37,6 +37,7 @@ const ICONS = {
   mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>',
   micoff: '<path d="M1 1l22 22M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6M17 16.95A7 7 0 0 1 5 12v-2M19 10v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"/>',
   send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>', stop: '<rect x="6" y="6" width="12" height="12" rx="3"/>',
+  down: '<path d="M6 9l6 6 6-6"/>',
   flip: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>'
 };
@@ -383,6 +384,47 @@ $('#bfile').onchange = async e => {
   } catch { toast('Could not restore. Wrong passphrase or file.'); }
 };
 $('#back').onclick = showList;
+/* ---------- Minimise a call into a small floating window, so you can keep chatting ---------- */
+(() => {
+  const st = document.createElement('style');
+  st.textContent = `
+  #bMin{position:absolute;left:14px;top:calc(14px + env(safe-area-inset-top));width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,.16);color:#fff;display:grid;place-items:center;padding:0;border:0;z-index:3;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  #bMin svg{width:22px;height:22px}
+  #call.rin #bMin,#call.mini #bMin{display:none}
+  @keyframes miniIn{from{opacity:0;transform:scale(1.8)}to{opacity:1;transform:none}}
+  #call.on.mini{inset:auto;top:calc(70px + env(safe-area-inset-top));right:12px;width:112px;height:152px;padding:0;border-radius:20px;overflow:hidden;box-shadow:0 14px 40px rgba(0,0,0,.45);z-index:90;touch-action:none;animation:miniIn .38s cubic-bezier(.2,.9,.25,1.1)}
+  #call.mini #lv,#call.mini #bAcc,#call.mini #bMute,#call.mini #bCam,#call.mini #bFlip{display:none!important}
+  #call.mini #cinfo{top:14%}
+  #call.mini #cinfo .av{width:52px;height:52px;font-size:1.3rem;margin:0 auto 6px;box-shadow:none}
+  #call.mini #cn2{font-size:13px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 6px}
+  #call.mini #cs2{font-size:12px}
+  #call.mini.vcall #cinfo{display:none}
+  #call.mini #cbar{padding:0 0 8px;gap:0}
+  #call.mini #cbar #bEnd{width:34px;height:34px}
+  #call.mini #cbar #bEnd svg{width:16px;height:16px}`;
+  document.head.append(st);
+  const b = el('button', { id: 'bMin', title: 'Minimise', innerHTML: ic('down') }); $('#call').append(b);
+  const C = $('#call');
+  window.minimizeCall = () => { if (C.classList.contains('on') && !C.classList.contains('rin')) C.classList.add('mini'); };
+  const expand = () => C.classList.remove('mini');
+  b.onclick = minimizeCall;
+  let sx, sy, ox, oy, moved, drag = false;
+  C.addEventListener('pointerdown', e => {
+    if (!C.classList.contains('mini') || e.target.closest('#bEnd')) return;
+    const r = C.getBoundingClientRect(); sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top; moved = false; drag = true; C.setPointerCapture(e.pointerId);
+  });
+  C.addEventListener('pointermove', e => {
+    if (!drag) return; const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (Math.abs(dx) + Math.abs(dy) > 6) moved = true; if (!moved) return;
+    const w = C.offsetWidth, h = C.offsetHeight;
+    C.style.left = Math.min(innerWidth - w - 6, Math.max(6, ox + dx)) + 'px'; C.style.top = Math.min(innerHeight - h - 6, Math.max(6, oy + dy)) + 'px'; C.style.right = 'auto';
+  });
+  C.addEventListener('pointerup', () => { if (!drag) return; drag = false; if (!moved) expand(); });
+  // when the whole app goes to the background, try the phone's own floating video window
+  const pip = () => { const v = $('#rv'); if (document.pictureInPictureEnabled && call && v.srcObject && !document.pictureInPictureElement && v.style.visibility === 'visible') v.requestPictureInPicture().catch(() => {}); };
+  try { navigator.mediaSession.setActionHandler('enterpictureinpicture', pip); } catch {}
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pip(); });
+})();
 $('#cMenu').onclick = () => openSheet(sh => {
   const c = contacts.find(x => x.id === curChat); if (!c) return;
   const ttl = el('select', {}, ...[[0, 'Off'], [3600, '1 hour'], [86400, '24 hours'], [604800, '7 days']].map(([v, t]) => el('option', { value: v, textContent: t, selected: c.ttl === v })));
@@ -801,7 +843,7 @@ function applyBright() {
   if (call && call.stream) call.stream.getVideoTracks().forEach(brightenTrack);
 }
 function callUI(show, name) {
-  $('#call').classList.toggle('on', show); if (!show) document.body.classList.remove('vcall');
+  $('#call').classList.toggle('on', show); if (!show) $('#call').classList.remove('mini'); if (!show) document.body.classList.remove('vcall');
   if (name != null) { $('#cn2').textContent = name; paintAv($('#cav2'), name); }
 }
 const setCallState = t => $('#cs2').textContent = t;
@@ -931,7 +973,7 @@ setInterval(() => { if (KEY) purge(); }, 30000);
   let leaving = false;
   addEventListener('popstate', () => {
     if (leaving) return;
-    if ($('#call').classList.contains('on')) return push();
+    if ($('#call').classList.contains('on')) { if (!$('#call').classList.contains('mini')) minimizeCall(); return push(); }
     if ($('#modal').classList.contains('show')) { closeSheet(); return push(); }
     if (document.body.classList.contains('chat-open')) { showList(); return push(); }
     push();
