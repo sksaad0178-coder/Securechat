@@ -80,7 +80,7 @@ async function unsealWith(key, buf) {
 const seal = obj => sealWith(KEY, obj), unseal = buf => unsealWith(KEY, buf);
 
 /* ---------- state ---------- */
-const DEFAULTS = () => ({ name: '', stun: true, noStore: true, lockMin: 5, myId: '' });
+const DEFAULTS = () => ({ name: '', stun: true, noStore: true, lockMin: 5, myId: '', turn: null, relayOnly: false });
 let contacts = [];                 // {id,name,ttl,pid,ps}
 let settings = DEFAULTS();
 const msgsCache = {};              // cid -> [msg]
@@ -299,6 +299,9 @@ const grp = (...rows) => el('div', { className: 'group' }, ...rows);
 const grpT = t => el('div', { className: 'grp-t', textContent: t });
 $('#openSettings').onclick = () => openSheet(sh => {
   const nm = el('input', { value: settings.name, placeholder: 'Your name' });
+  const tu = el('input', { value: (settings.turn && settings.turn.url) || '', placeholder: 'turn:your-server.com:3478', autocapitalize: 'off', autocorrect: 'off' });
+  const tn = el('input', { value: (settings.turn && settings.turn.user) || '', placeholder: 'Username', autocapitalize: 'off' });
+  const tp = el('input', { value: (settings.turn && settings.turn.pass) || '', placeholder: 'Password', type: 'password' });
   const lm = el('select', {}, ...[[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [0, 'Never']].map(([v, t]) => el('option', { value: v, textContent: t, selected: settings.lockMin === v })));
   lm.onchange = async () => { settings.lockMin = +lm.value; await saveSettings(); };
   const accents = [['blue', 'linear-gradient(135deg,#2f80ff,#38c6ff)'], ['purple', 'linear-gradient(135deg,#7c5cff,#c06bff)'], ['green', 'linear-gradient(135deg,#12b86a,#4be0a0)'], ['pink', 'linear-gradient(135deg,#ff4f8b,#ff8a5c)'], ['orange', 'linear-gradient(135deg,#ff8a00,#ffc23d)'], ['teal', 'linear-gradient(135deg,#0aa8b8,#3de0d0)']];
@@ -322,8 +325,15 @@ $('#openSettings').onclick = () => openSheet(sh => {
     grpT('Profile'),
     grp(setRow('Your name', 'Friends see this', nm, true)),
     grpT('Connection'),
-    grp(setRow('Use a public STUN server', 'Needed to connect over the internet. It only sees your IP address, never your content.', toggleCtl(settings.stun, async v => { settings.stun = v; await saveSettings(); }))),
-    el('button', { className: 'pri', textContent: 'Done', onclick: async () => { settings.name = nm.value.trim().slice(0, 40) || settings.name; await saveSettings(); closeSheet(); toast('Saved'); } }),
+    grp(setRow('Connect over the internet', 'Uses public helper servers so phones on different networks can find each other. They only see addresses and encrypted data, never your messages.', toggleCtl(settings.stun, async v => { settings.stun = v; await saveSettings(); })),
+      setRow('Always use the relay', 'Hides your IP address from your friend. Slower.', toggleCtl(settings.relayOnly, async v => { settings.relayOnly = v; await saveSettings(); })),
+      setRow('Your own relay (optional)', 'Free accounts at relay providers work. Paste the address, username and password they give you.', el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, tu, tn, tp), true)),
+    el('button', { textContent: 'Test my network', onclick: testNet }),
+    el('button', { className: 'pri', textContent: 'Done', onclick: async () => {
+      settings.name = nm.value.trim().slice(0, 40) || settings.name;
+      settings.turn = tu.value.trim() ? { url: tu.value.trim(), user: tn.value.trim(), pass: tp.value } : null;
+      await saveSettings(); closeSheet(); toast('Saved');
+    } }),
     el('button', { textContent: 'Back up my friends', onclick: backup }),
     el('button', { textContent: 'Restore from backup', onclick: () => $('#bfile').click() }),
     el('button', { textContent: 'Lock now', onclick: () => { closeSheet(); setTimeout(lockNow, 300); } }),
@@ -332,6 +342,22 @@ $('#openSettings').onclick = () => openSheet(sh => {
       closePeer(); await kvClear(); localStorage.clear(); location.reload();
     } }));
 });
+async function testNet() {
+  openSheet(sh => sh.append(el('h2', { textContent: 'Testing your network…' }), el('div', { className: 'spin' }), el('p', { id: 'ntRes', textContent: 'This takes up to 10 seconds.', style: 'text-align:center' })));
+  const found = { host: 0, srflx: 0, relay: 0, v6: 0 };
+  try {
+    const t = new RTCPeerConnection(iceConfig()); t.createDataChannel('x');
+    t.onicecandidate = e => { if (e.candidate) { const c = e.candidate; found[c.type] = (found[c.type] || 0) + 1; if ((c.address || '').includes(':')) found.v6++; } };
+    await t.setLocalDescription(await t.createOffer());
+    await new Promise(r => { const to = setTimeout(r, 10000); t.addEventListener('icegatheringstatechange', () => { if (t.iceGatheringState === 'complete') { clearTimeout(to); r(); } }); });
+    t.close();
+  } catch (e) { found.err = e.message; }
+  const line = (ok, yes, no) => el('div', { className: 'srow' }, el('div', { className: 't', textContent: ok ? yes : no }), el('div', { textContent: ok ? '✓' : '✗', style: 'font-weight:800;color:' + (ok ? 'var(--green)' : 'var(--red)') }));
+  const verdict = found.relay ? 'Good. You can connect from other networks and mobile data.' : found.srflx ? 'Direct links may work, but some networks will fail. Add your own relay in Settings if a friend cannot connect.' : 'No internet routes found. Check your internet, or the relay settings.';
+  openSheet(sh => sh.append(el('h2', { textContent: 'Network test' }),
+    el('div', { className: 'group' }, line(found.host, 'Local network found', 'No local network'), line(found.srflx, 'Public address found (STUN)', 'Public address not found'), line(found.relay, 'Relay server reachable (TURN)', 'Relay server not reachable'), line(found.v6, 'IPv6 available', 'IPv6 not available')),
+    el('p', { textContent: verdict }), el('button', { className: 'pri', textContent: 'Close', onclick: closeSheet })));
+}
 async function backup() {
   const data = await seal({ myId: settings.myId, name: settings.name, contacts: contacts.filter(c => c.ps) });
   const blob = new Blob([JSON.stringify({ v: 1, salt: localStorage.getItem('sc_salt'), data: b64u(data) })], { type: 'application/json' });
@@ -397,17 +423,33 @@ async function safetyCode() {
 function gathered() {
   return new Promise(res => {
     if (pc.iceGatheringState === 'complete') return res();
-    const t = setTimeout(res, 5000);
+    const t = setTimeout(res, settings.stun ? 8000 : 3000);
     pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
   });
 }
+/* STUN finds your public address. TURN is a relay that carries the (already end-to-end encrypted) traffic
+   when two phones are on different networks and cannot reach each other directly. */
+const PUBLIC_ICE = [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
+];
+function iceConfig() {
+  if (!settings.stun) return { iceServers: [] };
+  const list = [...PUBLIC_ICE], t = settings.turn;
+  if (t && t.url) list.unshift({ urls: t.url.split(/[\s,]+/).filter(Boolean), username: t.user || undefined, credential: t.pass || undefined });
+  return { iceServers: list, iceTransportPolicy: settings.relayOnly ? 'relay' : 'all' };
+}
+function makePC() {
+  try { return new RTCPeerConnection(iceConfig()); }
+  catch (e) { toast('Your relay address looks invalid. Using the default one.'); return new RTCPeerConnection({ iceServers: PUBLIC_ICE }); }
+}
 function newPC() {
   closePeer();
-  pc = new RTCPeerConnection({ iceServers: settings.stun ? [{ urls: 'stun:stun.l.google.com:19302' }] : [] });
+  pc = makePC();
   const me = pc;
   pc.onconnectionstatechange = () => {
     if (pc !== me) return;
-    if (pc.connectionState === 'failed' && !conn) { toast('Could not connect. Try both phones on the same Wi‑Fi.'); closePeer(); }
+    if (pc.connectionState === 'failed' && !conn) { toast('Could not connect. Your network blocks direct links. Open Settings > Connection to check the relay.'); closePeer(); }
     else if (['failed', 'closed'].includes(pc.connectionState)) peerLost();
     else updateStatus();
   };
