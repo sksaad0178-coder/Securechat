@@ -38,6 +38,10 @@ const ICONS = {
   micoff: '<path d="M1 1l22 22M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6M17 16.95A7 7 0 0 1 5 12v-2M19 10v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"/>',
   send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>', stop: '<rect x="6" y="6" width="12" height="12" rx="3"/>',
   down: '<path d="M6 9l6 6 6-6"/>',
+  reply: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 6 6v3"/>',
+  smile: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  backsp: '<path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"/><path d="M18 9l-6 6M12 9l6 6"/>',
   flip: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>'
 };
@@ -81,7 +85,7 @@ async function unsealWith(key, buf) {
 const seal = obj => sealWith(KEY, obj), unseal = buf => unsealWith(KEY, buf);
 
 /* ---------- state ---------- */
-const DEFAULTS = () => ({ name: '', stun: true, noStore: true, keepSec: 0, lockMin: 5, myId: '', turn: null, relayOnly: false });
+const DEFAULTS = () => ({ name: '', stun: true, noStore: true, keepSec: 0, got: [], lockMin: 5, myId: '', turn: null, relayOnly: false });
 let contacts = [];                 // {id,name,ttl,pid,ps}
 let settings = DEFAULTS();
 const msgsCache = {};              // cid -> [msg]
@@ -185,6 +189,7 @@ function paintAv(elm, name) {
 }
 const isOn = cid => !!(conn && conn.cid === cid && dc && dc.readyState === 'open');
 async function showList() {
+  try { closeEmoji(); clearReply(); closeMsgMenu(); } catch {}
   curChat = null; document.body.classList.remove('chat-open'); await renderList();
 }
 async function renderList() {
@@ -220,8 +225,17 @@ function updateStatus() {
   $('#aCall').disabled = $('#vCall').disabled = !on;
 }
 const tickOf = s => s === 'delivered' ? '✓✓' : s === 'sent' ? '✓' : s === 'pending' ? '…' : '';
+const snipOf = m => m.type === 'img' ? '📷 Photo' : m.type === 'voice' ? '🎤 Voice message' : m.type === 'file' ? '📎 ' + (m.name || 'File') : (m.text || '').slice(0, 90);
+const nameOfChat = () => (contacts.find(c => c.id === curChat) || {}).name || 'Friend';
 function bubble(m) {
   const d = document.createElement('div'); d.className = 'b ' + (m.from === 'me' ? 'me' : 'them'); d.dataset.id = m.id;
+  const pi = document.createElement('span'); pi.className = 'rpi'; pi.innerHTML = ic('reply'); d.append(pi);
+  if (m.re) {
+    const q = document.createElement('div'); q.className = 'rq'; q.dataset.to = m.re.id;
+    const qn = document.createElement('b'); qn.textContent = m.re.from === 'me' ? 'You' : nameOfChat();
+    const qt = document.createElement('span'); qt.textContent = m.re.text || '';
+    q.append(qn, qt); d.append(q);
+  }
   if (m.type === 'img') { const i = new Image(); i.src = m.data; d.append(i); }
   else if (m.type === 'voice') { const a = document.createElement('audio'); a.controls = true; a.src = m.data; d.append(a); }
   else if (m.type === 'file') { const a = document.createElement('a'); a.href = m.data; a.download = m.name || 'file'; a.textContent = (m.name || 'file'); d.append(a); }
@@ -229,9 +243,15 @@ function bubble(m) {
   const meta = document.createElement('div'); meta.className = 'meta';
   const tm = document.createElement('span'); tm.className = 'tm';
   tm.textContent = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + (m.from === 'me' ? ' ' + tickOf(m.status) : '');
-  const del = document.createElement('button'); del.innerHTML = ic('trash'); del.title = 'Delete';
-  del.onclick = () => { if (confirm('Delete this message' + (m.from === 'me' && conn ? ' for everyone?' : '?'))) deleteMsg(m.id, true); };
-  meta.append(tm, del); d.append(meta); return d;
+  meta.append(tm); d.append(meta);
+  const rx = m.rx && [m.rx.them, m.rx.me].filter(Boolean);
+  if (rx && rx.length) { const p = document.createElement('div'); p.className = 'rx'; p.textContent = rx.join(' '); d.append(p); d.classList.add('hasrx'); }
+  return d;
+}
+function refreshBubble(id) {
+  const n = $('#msgs').querySelector('[data-id="' + id + '"]'); if (!n || !curChat) return;
+  const m = (msgsCache[curChat] || []).find(x => x.id === id); if (!m) return;
+  const nb = bubble(m); n.replaceWith(nb); nb.classList.add('rxpop');
 }
 function updateTick(id, status) {
   const n = $('#msgs').querySelector('[data-id="' + id + '"] .tm'); if (!n) return;
@@ -504,7 +524,7 @@ function newPC() {
   };
   pc.ontrack = e => {
     remoteStream = e.streams[0] || new MediaStream([e.track]);
-    $('#rv').srcObject = remoteStream; updateRemoteView();
+    $('#rv').srcObject = remoteStream; $('#rv').play().catch(() => {}); updateRemoteView();
     e.track.onmute = e.track.onunmute = e.track.onended = updateRemoteView;
     remoteStream.onremovetrack = updateRemoteView;
   };
@@ -553,7 +573,7 @@ function setupDC(cid) {
 const sendRaw = o => { if (dc && dc.readyState === 'open') dc.send(JSON.stringify(o)); };
 async function wire(m) {
   const data = m.data || '', CH = 12000, n = Math.ceil(data.length / CH);
-  sendRaw({ t: 'msg', id: m.id, type: m.type, text: m.text, name: m.name, mime: m.mime, ts: m.ts, n });
+  sendRaw({ t: 'msg', id: m.id, type: m.type, text: m.text, name: m.name, mime: m.mime, ts: m.ts, re: m.re, n });
   for (let i = 0; i < n; i++) {
     while (dc && dc.bufferedAmount > 1e6) await sleep(40);
     sendRaw({ t: 'chunk', id: m.id, i, d: data.slice(i * CH, (i + 1) * CH) });
@@ -579,6 +599,8 @@ async function onWire(o) {
     case 'msg': incoming[o.id] = { meta: o, parts: [] }; if (!o.n) finishIncoming(o.id); break;
     case 'chunk': { const x = incoming[o.id]; if (!x) break; x.parts.push(o.d); if (x.parts.length >= x.meta.n) finishIncoming(o.id); break; }
     case 'ack': { const ms = await getMsgs(cid); const m = ms.find(m => m.id === o.id); if (m) { m.status = 'delivered'; saveMsgs(cid); if (curChat === cid) updateTick(m.id, 'delivered'); } break; }
+    case 'rx': { const ms = await getMsgs(cid), m = ms.find(x => x.id === o.id); if (!m) break; m.rx = m.rx || {}; if (o.e) m.rx.them = String(o.e).slice(0, 8); else delete m.rx.them; saveMsgs(cid); if (curChat === cid) refreshBubble(m.id); if (o.e) buzz(15); break; }
+    case 'cam': remoteCam = !!o.on; updateRemoteView(); break;
     case 'typing': if (curChat === cid) { $('#typing').textContent = 'typing…'; clearTimeout(typingTimer); typingTimer = setTimeout(() => $('#typing').textContent = '', 2500); } break;
     case 'del': { const ms = await getMsgs(cid), i = ms.findIndex(m => m.id === o.id); if (i >= 0) { ms.splice(i, 1); saveMsgs(cid); if (curChat === cid) renderMsgs(); } break; }
     case 'ttl': { const c = contacts.find(x => x.id === cid); if (c && c.ttl !== o.v) { c.ttl = o.v; saveContacts(); toast('Disappearing messages: ' + (o.v ? o.v / 3600 + 'h' : 'off')); } break; }
@@ -593,8 +615,9 @@ async function onWire(o) {
 async function finishIncoming(id) {
   const x = incoming[id]; delete incoming[id]; const o = x.meta, cid = conn && conn.cid; if (!cid) return;
   const ms = await getMsgs(cid);
-  ms.push({ id: o.id, from: 'them', type: o.type, text: o.text, name: o.name, mime: o.mime, ts: o.ts, data: x.parts.join('') });
-  saveMsgs(cid); sendRaw({ t: 'ack', id: o.id });
+  if (ms.some(m => m.id === o.id)) { sendRaw({ t: 'ack', id: o.id }); return; }
+  ms.push({ id: o.id, from: 'them', type: o.type, text: o.text, name: o.name, mime: o.mime, ts: o.ts, re: o.re, data: x.parts.join('') });
+  markGot(o.id); saveMsgs(cid); sendRaw({ t: 'ack', id: o.id });
   buzz(25);
   if (curChat === cid) { renderMsgs(true); $('#typing').textContent = ''; } else { unread[cid] = (unread[cid] || 0) + 1; if (curChat === null) renderList(); }
 }
@@ -734,14 +757,17 @@ async function watchContacts() {
   const cs = contacts.filter(c => c.ps); if (!cs.length) return;
   const map = {}; for (const c of cs) { const k = await ckeys(c); map[k.topic] = { c, k }; }
   watchMap = map;
-  const es = new EventSource(RELAY + Object.keys(map).join(',') + '/sse?since=3m'); watchES = es;
+  const es = new EventSource(RELAY + Object.keys(map).join(',') + '/sse?since=12h'); watchES = es;
   es.onmessage = ev => { try { const j = JSON.parse(ev.data); if (j.event === 'message' && watchMap[j.topic]) onContactNote(watchMap[j.topic], j.message, j.id); } catch {} };
 }
 async function onContactNote({ c, k }, m, id) {
   if (!KEY || (id && seen.has(id))) return; if (id) seen.add(id);
   try {
     const j = JSON.parse(m), o = await openNote(k.key, j.d);
-    if (o.from === settings.myId || Date.now() - o.ts > 150000) return;
+    if (o.from === settings.myId) return;
+    if (j.t === 'm') return onRelayMsg(c, o);
+    if (j.t === 'r') return onRelayAck(c, o);
+    if (Date.now() - o.ts > 150000) return;
     const busy = attempt && attempt.cid === c.id && attempt.pc && Date.now() - attempt.t < 20000;   // an attempt is already in progress
     if (j.t === 'k') { if (amOfferer(c) && !conn && !pairing && !busy) offerTo(c, k); }
     else if (j.t === 'o') { if (!amOfferer(c) && !conn && !pairing && !(attempt && attempt.oid && attempt.oid === o.oid)) answerTo(c, k, o.sdp, o.oid); }
@@ -749,6 +775,32 @@ async function onContactNote({ c, k }, m, id) {
       if (attempt && attempt.cid === c.id && attempt.oid && attempt.oid === o.oid && pc === attempt.pc && pc.signalingState === 'have-local-offer') await pc.setRemoteDescription(await unpack(o.sdp));
     }
   } catch (e) { /* not for us / bad note */ }
+}
+/* ----- messages left for a friend who is offline: encrypted, held by the relay for about 12 hours ----- */
+const gotSet = () => (settings.got = settings.got || []);
+const hasGot = id => gotSet().includes(id);
+let gotTimer = null;
+function markGot(id) { const g = gotSet(); if (g.includes(id)) return; g.push(id); if (g.length > 500) g.splice(0, 100); clearTimeout(gotTimer); gotTimer = setTimeout(() => KEY && saveSettings(), 800); }
+async function onRelayMsg(c, o) {
+  if (!o.id || hasGot(o.id)) return;
+  const ms = await getMsgs(c.id); if (ms.some(m => m.id === o.id)) return;
+  markGot(o.id);
+  ms.push({ id: o.id, from: 'them', type: 'text', text: String(o.text || '').slice(0, 2000), ts: o.mts || o.ts, re: o.re, relay: true }); ms.sort((a, b) => a.ts - b.ts);
+  saveMsgs(c.id); buzz(25);
+  if (curChat === c.id) renderMsgs(); else { unread[c.id] = (unread[c.id] || 0) + 1; if (curChat === null) renderList(); }
+  try { const k = await ckeys(c); await postNote(k, 'r', { id: o.id }); } catch {}
+  try { if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('SecureChat', { body: 'New message', tag: 'sc-msg', silent: false }); } catch {}
+}
+async function onRelayAck(c, o) {
+  const ms = await getMsgs(c.id), m = ms.find(x => x.id === o.id); if (!m || m.status === 'delivered') return;
+  m.status = 'delivered'; saveMsgs(c.id); if (curChat === c.id) updateTick(m.id, 'delivered');
+}
+async function relayMsg(cid, m) {
+  const c = contacts.find(x => x.id === cid); if (!c || !c.ps) return;
+  try {
+    const k = await ckeys(c); await postNote(k, 'm', { id: m.id, text: m.text, mts: m.ts, re: m.re });
+    m.status = 'sent'; m.relay = true; saveMsgs(cid); if (curChat === cid) updateTick(m.id, 'sent');
+  } catch {}
 }
 async function offerTo(c, k) {
   if (conn || pairing) return;
@@ -779,6 +831,164 @@ async function reach(cid) {
 }
 setInterval(() => { if (KEY && curChat && !document.hidden && !isOn(curChat)) reach(curChat); }, 15000);
 
+/* ---------- Chat extras: reply, reactions, emoji ---------- */
+let replyTo = null, emojiOpen = false;
+(() => {
+  const st = document.createElement('style');
+  st.textContent = `
+  #msgs{overflow-x:hidden}
+  .b{touch-action:pan-y;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;transition:transform .45s var(--spring)}
+  .b.drag{transition:none}
+  .b.hasrx{margin-bottom:14px}
+  .b .rpi{position:absolute;left:-42px;top:50%;margin-top:-15px;width:30px;height:30px;border-radius:50%;background:var(--solid);color:var(--a1);display:grid;place-items:center;opacity:0;transform:scale(.4);transition:opacity .2s,transform .35s var(--spring);box-shadow:0 4px 12px rgba(0,0,0,.18);pointer-events:none}
+  .b .rpi svg{width:16px;height:16px}
+  .b.pull .rpi{opacity:1;transform:scale(1)}
+  .b .rq{border-left:3px solid var(--a1);background:rgba(127,127,127,.18);border-radius:8px;padding:5px 9px;margin:0 0 6px;font-size:.82rem;line-height:1.3;cursor:pointer;display:flex;flex-direction:column;gap:1px;max-width:100%}
+  .b .rq b{font-size:.76rem;color:var(--a1);font-weight:600}.b.me .rq b{color:#fff}
+  .b .rq span{opacity:.85;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal}
+  .b .rx{position:absolute;bottom:-15px;right:12px;background:var(--solid);color:var(--text);border-radius:999px;padding:1px 7px;font-size:.95rem;line-height:1.5;box-shadow:0 3px 10px rgba(0,0,0,.2);white-space:nowrap}
+  .b.them .rx{right:auto;left:12px}
+  @keyframes rxpop{0%{transform:scale(.6)}60%{transform:scale(1.06)}100%{transform:none}}
+  .b.rxpop .rx{animation:rxpop .5s var(--spring)}
+  .b.flash{animation:bflash 1.1s var(--ease)}
+  @keyframes bflash{0%,60%{filter:brightness(1.35)}100%{filter:none}}
+  #rbar{display:flex;align-items:center;gap:10px;margin:0 12px;padding:0 12px;max-height:0;opacity:0;overflow:hidden;background:var(--solid);border-radius:16px 16px 0 0;transition:max-height .35s var(--sheet),opacity .25s,padding .35s var(--sheet)}
+  #rbar.on{max-height:64px;opacity:1;padding:8px 12px}
+  #rbar i{width:3px;align-self:stretch;background:var(--a1);border-radius:2px}
+  #rbar div{flex:1;min-width:0;font-size:.82rem}#rbar b{display:block;color:var(--a1);font-size:.78rem}
+  #rbar span{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;opacity:.8}
+  #rbar button{width:30px;height:30px;padding:0;border-radius:50%;background:transparent;box-shadow:none;color:var(--dim);font-size:1.2rem;line-height:1}
+  #rmenu{position:fixed;inset:0;z-index:95;background:rgba(10,14,25,.35);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);opacity:0;transition:opacity .25s}
+  #rmenu.on{opacity:1}
+  #rmenu .b{position:fixed;margin:0;transform:scale(.96);transition:transform .45s var(--spring);box-shadow:0 18px 50px rgba(0,0,0,.35)}
+  #rmenu.on .b{transform:scale(1.03)}
+  #rmenu .rbr{position:fixed;display:flex;gap:2px;padding:6px 8px;border-radius:999px;background:var(--solid);box-shadow:0 14px 40px rgba(0,0,0,.3);transform:scale(.3);opacity:0;transition:transform .5s var(--spring),opacity .2s;max-width:calc(100vw - 16px);overflow-x:auto}
+  #rmenu.on .rbr{transform:none;opacity:1}
+  #rmenu .rbr button{font-size:1.65rem;width:44px;height:44px;padding:0;background:none;box-shadow:none;border-radius:50%;transition:transform .25s var(--spring);flex:none}
+  #rmenu .rbr button:active{transform:scale(1.35)}
+  #rmenu .rbr button.sel{background:rgba(127,127,127,.25)}
+  #rmenu .ract{position:fixed;min-width:190px;border-radius:16px;background:var(--solid);box-shadow:0 14px 40px rgba(0,0,0,.3);overflow:hidden;transform:scale(.6);opacity:0;transition:transform .45s var(--spring),opacity .2s}
+  #rmenu.on .ract{transform:none;opacity:1}
+  #rmenu .ract button{display:flex;align-items:center;justify-content:space-between;width:100%;border-radius:0;background:none;box-shadow:none;padding:13px 16px;font-size:1rem;color:var(--text);text-align:left;border-bottom:1px solid var(--line)}
+  #rmenu .ract button:last-child{border:0}#rmenu .ract button.red{color:var(--red)}
+  #rmenu .ract svg{width:18px;height:18px}
+  #epanel{height:0;overflow:hidden;transition:height .4s var(--sheet);background:var(--solid);border-radius:20px 20px 0 0;display:flex;flex-direction:column;flex:none}
+  #epanel.on{height:290px}
+  #epanel .tabs{display:flex;gap:2px;padding:8px 10px 4px;align-items:center}
+  #epanel .tabs button{font-size:1.25rem;width:38px;height:36px;padding:0;background:none;box-shadow:none;border-radius:10px;opacity:.55}
+  #epanel .tabs button.on{opacity:1;background:rgba(127,127,127,.2)}
+  #epanel .tabs .sp{flex:1}
+  #epanel .tabs button.bk{opacity:.8;color:var(--text)}#epanel .tabs button.bk svg{width:22px;height:22px}
+  #epanel .grid{flex:1;overflow-y:auto;overscroll-behavior:contain;display:grid;grid-template-columns:repeat(8,1fr);align-content:start;padding:2px 8px calc(10px + env(safe-area-inset-bottom))}
+  #epanel .grid button{font-size:1.7rem;height:44px;padding:0;background:none;box-shadow:none;border-radius:10px;transition:transform .2s var(--spring)}
+  #epanel .grid button:active{transform:scale(1.4);background:rgba(127,127,127,.2)}
+  #emo{flex:none}`;
+  document.head.append(st);
+
+  /* --- emoji panel --- */
+  const EMO = {
+    '😀': '😀 😃 😄 😁 😆 😅 😂 🤣 🥲 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥸 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🫡 🤭 🫢 🤫 🫠 🤥 😶 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 😈 👿 💀 👻 👽 🤖 💩',
+    '👍': '👍 👎 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ ✋ 🤚 🖐️ 🖖 👋 🤝 🙏 💪 👏 🙌 🫶 👐 🤲 ✍️ 🤳 💅 👀 👁️ 👅 👄 🧠 🙋 🤷 🤦 🙇 🫵 🫰',
+    '❤️': '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 💕 💞 💓 💗 💖 💘 💝 💟 ♥️ 😻 💋 💯 💢 💥 💫 💦 💨 ✨ 🔥 ⭐ 🌟 🎉 🎊 🎁 🎈 🏆 🎯',
+    '🐶': '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦆 🦅 🦉 🐺 🐴 🦄 🐝 🦋 🐌 🐢 🐍 🐙 🐬 🐳 🦈 🌸 🌹 🌻 🌲 🍀 🌈 ☀️ 🌙 ☁️ ⚡ ❄️ 🌍',
+    '🍕': '🍎 🍌 🍇 🍓 🍉 🍑 🍍 🥭 🥑 🍅 🌽 🥕 🍞 🧀 🍳 🥞 🍔 🍟 🍕 🌭 🌮 🍜 🍝 🍣 🍤 🍚 🍰 🎂 🍩 🍪 🍫 🍿 ☕ 🍵 🥤 🍺 🍷',
+    '⚽': '⚽ 🏀 🏏 🎮 🎧 🎵 🎶 🎬 📷 📱 💻 ⌚ 💡 📚 ✏️ 🎓 💼 🔑 🔒 🚗 ✈️ 🚀 🏠 ⏰ 💰 🕌 🤲'
+  };
+  const panel = el('div', { id: 'epanel' }), tabs = el('div', { className: 'tabs' }), grid = el('div', { className: 'grid' });
+  const txt = $('#txt');
+  const put = e => { const a = txt.selectionStart ?? txt.value.length, b = txt.selectionEnd ?? a; txt.setRangeText(e, a, b, 'end'); txt.dispatchEvent(new Event('input')); };
+  const back = () => {
+    let a = txt.selectionStart ?? txt.value.length, b = txt.selectionEnd ?? a; if (!txt.value) return;
+    if (a === b) { const before = txt.value.slice(0, a), seg = window.Intl && Intl.Segmenter ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(before)] : Array.from(before).map(x => ({ segment: x })); const last = seg.length ? seg[seg.length - 1].segment.length : 0; a = Math.max(0, a - last); }
+    txt.setRangeText('', a, b, 'end'); txt.dispatchEvent(new Event('input'));
+  };
+  const showCat = k => { [...tabs.querySelectorAll('button[data-k]')].forEach(x => x.classList.toggle('on', x.dataset.k === k)); grid.innerHTML = ''; grid.scrollTop = 0; EMO[k].split(' ').forEach(e => { const b = el('button', { textContent: e }); b.onclick = () => put(e); grid.append(b); }); };
+  Object.keys(EMO).forEach(k => { const b = el('button', { textContent: k }); b.dataset.k = k; b.onclick = () => showCat(k); tabs.append(b); });
+  tabs.append(el('span', { className: 'sp' })); const bk = el('button', { className: 'bk', innerHTML: ic('backsp') }); bk.onclick = back; tabs.append(bk);
+  panel.append(tabs, grid); $('.composer').after(panel); showCat('😀');
+  [panel, tabs, grid].forEach(n => n.addEventListener('pointerdown', e => { if (e.target.closest('button')) e.preventDefault(); }));
+  const eb = el('button', { className: 'circ', id: 'emo', title: 'Emoji', innerHTML: ic('smile') }); $('#mic').before(eb);
+  eb.addEventListener('pointerdown', e => e.preventDefault());
+  window.closeEmoji = () => { if (!emojiOpen) return; emojiOpen = false; panel.classList.remove('on'); txt.removeAttribute('inputmode'); eb.innerHTML = ic('smile'); };
+  window.openEmoji = () => { emojiOpen = true; panel.classList.add('on'); txt.blur(); txt.setAttribute('inputmode', 'none'); txt.focus({ preventScroll: true }); eb.innerHTML = '<span style="font-size:1.1rem">⌨️</span>'; setTimeout(() => { const m = $('#msgs'); m.scrollTop = m.scrollHeight; }, 420); };
+  eb.onclick = () => { if (emojiOpen) { closeEmoji(); txt.blur(); txt.focus(); } else openEmoji(); };
+  txt.addEventListener('focus', () => { if (emojiOpen && txt.getAttribute('inputmode') !== 'none') closeEmoji(); });
+
+  /* --- reply bar --- */
+  const rbar = el('div', { id: 'rbar' }); $('.composer').before(rbar);
+  window.startReply = id => {
+    const m = (msgsCache[curChat] || []).find(x => x.id === id); if (!m) return;
+    replyTo = m; rbar.innerHTML = '';
+    const x = el('button', { textContent: '✕' }); x.onclick = clearReply;
+    rbar.append(el('i'), el('div', {}, el('b', { textContent: 'Replying to ' + (m.from === 'me' ? 'yourself' : nameOfChat()) }), el('span', { textContent: snipOf(m) })), x);
+    rbar.classList.add('on'); txt.focus({ preventScroll: true }); buzz(10);
+  };
+  window.clearReply = () => { replyTo = null; rbar.classList.remove('on'); };
+
+  /* --- reaction + action menu --- */
+  const REACT = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
+  window.closeMsgMenu = () => { const o = $('#rmenu'); if (!o) return; o.classList.remove('on'); setTimeout(() => o.remove(), 260); };
+  async function react(m, e) {
+    m.rx = m.rx || {}; if (m.rx.me === e) { delete m.rx.me; e = ''; } else m.rx.me = e;
+    saveMsgs(curChat); refreshBubble(m.id); sendRaw({ t: 'rx', id: m.id, e }); buzz(15);
+  }
+  const openMenu = (node, m) => {
+    closeMsgMenu(); try { txt.blur(); } catch {}
+    const ov = el('div', { id: 'rmenu' }); ov.addEventListener('click', e => { if (e.target === ov) closeMsgMenu(); });
+    const r = node.getBoundingClientRect(), W = innerWidth, H = innerHeight, mine = m.from === 'me';
+    const cl = node.cloneNode(true); cl.classList.remove('pull', 'drag', 'pop', 'rxpop'); cl.style.cssText = `left:${r.left}px;top:${r.top}px;width:${r.width}px;max-width:none`; ov.append(cl);
+    const bar = el('div', { className: 'rbr' }), act = el('div', { className: 'ract' });
+    REACT.forEach(e => { const b = el('button', { textContent: e, className: m.rx && m.rx.me === e ? 'sel' : '' }); b.onclick = () => { closeMsgMenu(); react(m, e); }; bar.append(b); });
+    const items = [['Reply', 'reply', () => startReply(m.id)]];
+    if (m.text) items.push(['Copy', 'copy', async () => { try { await navigator.clipboard.writeText(m.text); toast('Copied'); } catch { toast('Cannot copy'); } }]);
+    items.push(['Delete', 'trash', () => { if (confirm('Delete this message' + (mine && conn ? ' for everyone?' : '?'))) deleteMsg(m.id, true); }, 'red']);
+    items.forEach(([t, i, f, c]) => { const b = el('button', { className: c || '' }); b.append(el('span', { textContent: t })); b.insertAdjacentHTML('beforeend', ic(i)); b.onclick = () => { closeMsgMenu(); f(); }; act.append(b); });
+    ov.append(bar, act); document.body.append(ov);
+    const bw = bar.offsetWidth, bh = bar.offsetHeight, ah = act.offsetHeight, aw = act.offsetWidth;
+    let top = r.top, bt = top - bh - 10, at = r.bottom + 10;
+    if (bt < 70) { bt = 70; top = bt + bh + 10; cl.style.top = top + 'px'; at = top + r.height + 10; }
+    if (at + ah > H - 10) { const sh = at + ah - (H - 10); top -= sh; bt -= sh; at -= sh; cl.style.top = top + 'px'; if (bt < 8) { bt = 8; } }
+    bar.style.top = bt + 'px'; act.style.top = at + 'px';
+    const bl = mine ? Math.max(8, Math.min(W - bw - 8, r.right - bw)) : Math.max(8, Math.min(W - bw - 8, r.left));
+    const al = mine ? Math.max(8, Math.min(W - aw - 8, r.right - aw)) : Math.max(8, Math.min(W - aw - 8, r.left));
+    bar.style.left = bl + 'px'; act.style.left = al + 'px'; bar.style.transformOrigin = (mine ? 'right' : 'left') + ' bottom'; act.style.transformOrigin = (mine ? 'right' : 'left') + ' top';
+    requestAnimationFrame(() => requestAnimationFrame(() => ov.classList.add('on')));
+  };
+  window.closeMsgMenu = closeMsgMenu;
+
+  /* --- gestures on bubbles: long-press = menu, swipe right = reply, tap quote = jump --- */
+  const box = $('#msgs'); let g = null, lp = null;
+  const findB = t => t.closest && t.closest('.b');
+  const msgOf = id => (msgsCache[curChat] || []).find(x => x.id === id);
+  box.addEventListener('pointerdown', e => {
+    const n = findB(e.target); if (!n || (e.pointerType === 'mouse' && e.button > 0)) return;
+    g = { n, x: e.clientX, y: e.clientY, id: n.dataset.id, mode: null, fired: false };
+    lp = setTimeout(() => { if (g && !g.mode) { g.fired = true; buzz(20); const m = msgOf(g.id); if (m) openMenu(g.n, m); } }, 420);
+  });
+  box.addEventListener('pointermove', e => {
+    if (!g || g.fired) return; const dx = e.clientX - g.x, dy = e.clientY - g.y;
+    if (!g.mode) {
+      if (dx > 10 && dx > Math.abs(dy) * 1.5) { g.mode = 'swipe'; clearTimeout(lp); g.n.classList.add('drag'); }
+      else if (Math.abs(dy) > 8 || dx < -10) { g.mode = 'scroll'; clearTimeout(lp); }
+    }
+    if (g.mode === 'swipe') {
+      const d = Math.min(76, dx * .55); g.n.style.transform = `translateX(${d}px)`;
+      const pull = d >= 44; if (pull !== g.pull) { g.pull = pull; g.n.classList.toggle('pull', pull); if (pull) buzz(12); }
+    }
+  });
+  const endG = () => {
+    clearTimeout(lp); if (!g) return; const s = g; g = null;
+    if (s.mode === 'swipe') { s.n.classList.remove('drag'); s.n.style.transform = ''; s.n.classList.remove('pull'); if (s.pull) startReply(s.id); }
+  };
+  box.addEventListener('pointerup', endG); box.addEventListener('pointercancel', endG);
+  box.addEventListener('contextmenu', e => { const n = findB(e.target); if (n) { e.preventDefault(); if (!g || !g.fired) { const m = msgOf(n.dataset.id); if (m) openMenu(n, m); } } });
+  box.addEventListener('click', e => {
+    const q = e.target.closest && e.target.closest('.rq'); if (!q) return;
+    const t = box.querySelector('[data-id="' + q.dataset.to + '"]'); if (!t) return toast('Original message is gone');
+    t.scrollIntoView({ block: 'center', behavior: 'smooth' }); t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash');
+  });
+})();
+
 /* ---------- sending ---------- */
 async function addMsg(partial) {
   const cid = curChat; if (!cid) return;
@@ -786,11 +996,15 @@ async function addMsg(partial) {
   const m = Object.assign({ id: uid(), from: 'me', ts: Date.now(), status: online ? 'sent' : 'pending' }, partial);
   const ms = await getMsgs(cid); ms.push(m); saveMsgs(cid); renderMsgs(true);
   if (online) await wire(m);
+  else if (m.type === 'text' && (m.text || '').length <= 1800) relayMsg(cid, m);
 }
 $('#send').onclick = async () => {
   const t = $('#txt').value.trim(); if (!t) return;
-  $('#txt').value = ''; $('#txt').style.height = ''; await addMsg({ type: 'text', text: t });
+  const re = replyTo ? { id: replyTo.id, from: replyTo.from, text: snipOf(replyTo) } : undefined; clearReply();
+  $('#txt').value = ''; $('#txt').style.height = ''; $('#txt').focus({ preventScroll: true });   // keep the keyboard open
+  await addMsg({ type: 'text', text: t, re });
 };
+$('#send').addEventListener('pointerdown', e => e.preventDefault());   // tapping send must not steal focus from the text box
 $('#txt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !/Mobi|Android/i.test(navigator.userAgent)) { e.preventDefault(); $('#send').click(); } });
 $('#txt').addEventListener('input', e => {
   e.target.style.height = 'auto'; e.target.style.height = Math.min(120, e.target.scrollHeight) + 'px';
@@ -847,12 +1061,26 @@ function callUI(show, name) {
   if (name != null) { $('#cn2').textContent = name; paintAv($('#cav2'), name); }
 }
 const setCallState = t => $('#cs2').textContent = t;
+let remoteCam = true;
 function updateRemoteView() {
-  const v = remoteStream && remoteStream.getVideoTracks().some(t => t.readyState === 'live' && !t.muted);
-  $('#rv').style.visibility = v ? 'visible' : 'hidden'; $('#cinfo').classList.toggle('hidden', !!v); document.body.classList.toggle('vcall', !!v);
+  const rv = $('#rv'), rt = remoteStream && remoteStream.getVideoTracks().find(t => t.readyState === 'live');
+  const v = !!rt && remoteCam !== false && (rv.videoWidth > 0 || !rt.muted);
+  rv.style.visibility = v ? 'visible' : 'hidden'; $('#cinfo').classList.toggle('hidden', !!v); document.body.classList.toggle('vcall', !!v);
+  let dg = $('#cdiag'); if (!dg) { dg = el('div', { id: 'cdiag' }); dg.style.cssText = 'margin-top:8px;font-size:.85rem;opacity:.75'; $('#cinfo').append(dg); }
+  dg.textContent = !call || !call.answered ? '' : remoteCam === false ? 'Camera is off' : (rt && !v ? 'Waiting for video…' : '');
+}
+['loadedmetadata', 'resize', 'playing'].forEach(ev => $('#rv').addEventListener(ev, updateRemoteView));
+function sendCam() { const t = call && call.stream && call.stream.getVideoTracks()[0]; sendRaw({ t: 'cam', on: !!(t && t.enabled && t.readyState === 'live') }); }
+function callSession(on) {
+  try {
+    const ms = navigator.mediaSession; if (!ms) return;
+    if (!on) { ms.metadata = null; ms.playbackState = 'none'; return; }
+    ms.metadata = new MediaMetadata({ title: 'Call with ' + connName(), artist: 'SecureChat · encrypted' }); ms.playbackState = 'playing';
+    for (const [a, f] of [['hangup', () => $('#bEnd').click()], ['togglemicrophone', () => $('#bMute').click()], ['togglecamera', () => $('#bCam').click()]]) { try { ms.setActionHandler(a, f); } catch {} }
+  } catch {}
 }
 function startTimer() {
-  const t0 = Date.now(); clearInterval(callTimer);
+  callSession(true); const t0 = Date.now(); clearInterval(callTimer);
   callTimer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); setCallState(String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0')); }, 1000);
 }
 function ring(on) {
@@ -871,6 +1099,7 @@ async function attachLocal() {
   $('#lv').srcObject = call.stream; $('#lv').classList.toggle('hidden', !hasV); applyBright();
   $('#bCam').classList.toggle('off', !hasV); $('#bCam').innerHTML = ic(hasV ? 'video' : 'videooff');
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  sendCam();
 }
 async function startCall(video) {
   if (!conn || call) return;
@@ -907,7 +1136,7 @@ function endCallLocal() {
     try { call.senders.forEach(s => pc && pc.signalingState !== 'closed' && pc.removeTrack(s)); } catch {}
     call.stream && call.stream.getTracks().forEach(t => t.stop());
   }
-  $('#call').classList.remove('rin'); call = null; remoteStream = null; $('#rv').srcObject = null; $('#rv').style.visibility = 'hidden'; $('#lv').srcObject = null; callUI(false);
+  callSession(false); remoteCam = true; $('#call').classList.remove('rin'); call = null; remoteStream = null; $('#rv').srcObject = null; $('#rv').style.visibility = 'hidden'; $('#lv').srcObject = null; callUI(false);
   try { wakeLock && wakeLock.release(); } catch {} wakeLock = null;
 }
 $('#bMute').onclick = () => {
@@ -921,11 +1150,11 @@ $('#bCam').onclick = async () => {
     try {
       const s = await getMedia(true); t = s.getVideoTracks()[0]; s.getAudioTracks().forEach(a => a.stop());
       call.stream.addTrack(t); call.senders.push(pc.addTrack(t, call.stream));
-      $('#lv').srcObject = call.stream; $('#lv').classList.remove('hidden'); $('#bCam').classList.remove('off'); $('#bCam').innerHTML = ic('video');
+      $('#lv').srcObject = call.stream; $('#lv').classList.remove('hidden'); $('#bCam').classList.remove('off'); $('#bCam').innerHTML = ic('video'); sendCam();
     } catch { toast('Camera not available'); }
     return;
   }
-  t.enabled = !t.enabled; $('#bCam').classList.toggle('off', !t.enabled); $('#lv').classList.toggle('hidden', !t.enabled); $('#bCam').innerHTML = ic(t.enabled ? 'video' : 'videooff');
+  t.enabled = !t.enabled; $('#bCam').classList.toggle('off', !t.enabled); $('#lv').classList.toggle('hidden', !t.enabled); $('#bCam').innerHTML = ic(t.enabled ? 'video' : 'videooff'); sendCam();
 };
 let facing = 'user', flipping = false;
 $('#bFlip').onclick = async () => {
@@ -974,7 +1203,10 @@ setInterval(() => { if (KEY) purge(); }, 30000);
   addEventListener('popstate', () => {
     if (leaving) return;
     if ($('#call').classList.contains('on')) { if (!$('#call').classList.contains('mini')) minimizeCall(); return push(); }
+    if ($('#rmenu')) { closeMsgMenu(); return push(); }
     if ($('#modal').classList.contains('show')) { closeSheet(); return push(); }
+    if (emojiOpen) { closeEmoji(); return push(); }
+    if (replyTo) { clearReply(); return push(); }
     if (document.body.classList.contains('chat-open')) { showList(); return push(); }
     push();
     openSheet(sh => sh.append(el('h2', { textContent: 'Exit SecureChat?' }),
