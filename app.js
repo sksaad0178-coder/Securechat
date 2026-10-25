@@ -14,7 +14,7 @@ const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')
 const hex = u8 => [...u8].map(x => x.toString(16).padStart(2, '0')).join('');
 
 /* ---------- look & feel (not secret, so kept plainly to style the login page too) ---------- */
-const UI_DEFAULT = { vbright: 1.15, theme: 'auto', accent: 'blue', fs: 16, wall: 'aurora', bubble: 'round', motion: true, ring: true, vib: true };
+const UI_DEFAULT = { bg: true, vbright: 1.15, theme: 'auto', accent: 'blue', fs: 16, wall: 'aurora', bubble: 'round', motion: true, ring: true, vib: true };
 let UI = Object.assign({}, UI_DEFAULT, (() => { try { return JSON.parse(localStorage.getItem('sc_ui') || '{}'); } catch { return {}; } })());
 const mq = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : null;
 function applyUI() {
@@ -37,6 +37,7 @@ const ICONS = {
   mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>',
   micoff: '<path d="M1 1l22 22M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6M17 16.95A7 7 0 0 1 5 12v-2M19 10v2a7 7 0 0 1-.11 1.23M12 19v4M8 23h8"/>',
   send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>', stop: '<rect x="6" y="6" width="12" height="12" rx="3"/>',
+  screen: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
   down: '<path d="M6 9l6 6 6-6"/>',
   reply: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 6 6v3"/>',
   smile: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>',
@@ -160,14 +161,14 @@ async function initLock() {
       await loadAll();
       if (first) { settings.name = $('#uname').value.trim().slice(0, 40); await saveSettings(); }
       $('#lock').classList.add('hidden'); $('#app').classList.remove('hidden');
-      await showList(); watchContacts(); handleLinkJoin();
+      await showList(); watchContacts(); handleLinkJoin(); keepAlive();
     } catch (e) { err.textContent = 'Error: ' + e.message; }
   };
   $('#pin').onkeydown = $('#pin2').onkeydown = e => { if (e.key === 'Enter') $('#lockBtn').click(); };
 }
 function lockNow() {
   if (call) return;
-  stopWatch(); stopRelay(); closePeer();
+  stopKeepAlive(); stopWatch(); stopRelay(); closePeer();
   KEY = null; contacts = []; settings = DEFAULTS(); unread = {};
   for (const k in msgsCache) delete msgsCache[k];
   for (const k in ckCache) delete ckCache[k];
@@ -177,7 +178,7 @@ function lockNow() {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { if (KEY && settings.lockMin > 0) lockTimer = setTimeout(lockNow, settings.lockMin * 60000); }
-  else { clearTimeout(lockTimer); if (KEY) { watchContacts(); if (curChat && !isOn(curChat)) reach(curChat); } }
+  else { clearTimeout(lockTimer); if (KEY) { watchContacts(); const t = curChat || lastConn; if (t && !isOn(t)) reach(t); keepAlive(); try { if (call && !wakeLock) navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(() => {}); } catch {} } }
 });
 
 /* ---------- views ---------- */
@@ -353,7 +354,8 @@ $('#openSettings').onclick = () => openSheet(sh => {
     grpT('Profile'),
     grp(setRow('Your name', 'Friends see this', nm, true)),
     grpT('Connection'),
-    grp(setRow('Connect over the internet', 'Uses public helper servers so phones on different networks can find each other. They only see addresses and encrypted data, never your messages.', toggleCtl(settings.stun, async v => { settings.stun = v; await saveSettings(); })),
+    grp(setRow('Stay connected in background', 'Keeps chat and calls running when you leave the app. Shows a small “SecureChat” media notification.', toggleCtl(UI.bg, v => { UI.bg = v; saveUI(); v ? keepAlive() : stopKeepAlive(); })),
+      setRow('Connect over the internet', 'Uses public helper servers so phones on different networks can find each other. They only see addresses and encrypted data, never your messages.', toggleCtl(settings.stun, async v => { settings.stun = v; await saveSettings(); })),
       setRow('Always use the relay', 'Hides your IP address from your friend. Slower.', toggleCtl(settings.relayOnly, async v => { settings.relayOnly = v; await saveSettings(); })),
       setRow('Your own relay (optional)', 'Free accounts at relay providers work. Paste the address, username and password they give you.', el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, tu, tn, tp), true)),
     el('button', { textContent: 'Test my network', onclick: testNet }),
@@ -425,8 +427,18 @@ $('#back').onclick = showList;
   document.head.append(st);
   const b = el('button', { id: 'bMin', title: 'Minimise', innerHTML: ic('down') }); $('#call').append(b);
   const C = $('#call');
-  window.minimizeCall = () => { if (C.classList.contains('on') && !C.classList.contains('rin')) C.classList.add('mini'); };
-  const expand = () => C.classList.remove('mini');
+  const vv = window.visualViewport;
+  const clamp = () => {
+    if (!C.classList.contains('mini')) return;
+    const r = { top: C.offsetTop, left: C.offsetLeft, width: C.offsetWidth, height: C.offsetHeight }, t0 = vv ? vv.offsetTop : 0, h = vv ? vv.height : innerHeight, l0 = vv ? vv.offsetLeft : 0, w = vv ? vv.width : innerWidth;
+    if (want === null) want = r.top;
+    const t = Math.max(t0 + 8, Math.min(t0 + h - r.height - 8, want)), l = Math.max(l0 + 6, Math.min(l0 + w - r.width - 6, r.left));
+    if (Math.abs(t - r.top) > 1 || Math.abs(l - r.left) > 1) { C.style.top = t + 'px'; C.style.left = l + 'px'; C.style.right = 'auto'; }
+  };
+  if (vv) ['resize', 'scroll'].forEach(e => vv.addEventListener(e, clamp)); addEventListener('resize', clamp);
+  window.minimizeCall = () => { if (C.classList.contains('on') && !C.classList.contains('rin')) { C.classList.add('mini'); want = null; requestAnimationFrame(clamp); } };
+  let want = null;   // where the small window wants to sit (kept on screen even when the keyboard opens)
+  const expand = () => { C.classList.remove('mini'); C.style.top = C.style.left = C.style.right = ''; want = null; };
   b.onclick = minimizeCall;
   let sx, sy, ox, oy, moved, drag = false;
   C.addEventListener('pointerdown', e => {
@@ -437,7 +449,8 @@ $('#back').onclick = showList;
     if (!drag) return; const dx = e.clientX - sx, dy = e.clientY - sy;
     if (Math.abs(dx) + Math.abs(dy) > 6) moved = true; if (!moved) return;
     const w = C.offsetWidth, h = C.offsetHeight;
-    C.style.left = Math.min(innerWidth - w - 6, Math.max(6, ox + dx)) + 'px'; C.style.top = Math.min(innerHeight - h - 6, Math.max(6, oy + dy)) + 'px'; C.style.right = 'auto';
+    const t0 = vv ? vv.offsetTop : 0, hh = vv ? vv.height : innerHeight;
+    C.style.left = Math.min(innerWidth - w - 6, Math.max(6, ox + dx)) + 'px'; C.style.top = Math.min(t0 + hh - h - 8, Math.max(t0 + 8, oy + dy)) + 'px'; C.style.right = 'auto'; want = parseFloat(C.style.top);
   });
   C.addEventListener('pointerup', () => { if (!drag) return; drag = false; if (!moved) expand(); });
   // when the whole app goes to the background, try the phone's own floating video window
@@ -552,7 +565,7 @@ function setupDC(cid) {
   dc.onopen = async () => {
     if (dc !== myDc || opened) return; opened = true;
     armRenegotiation();
-    conn = { cid, safety: '…', rnd: b64u(crypto.getRandomValues(new Uint8Array(16))) };
+    lastConn = cid; conn = { cid, safety: '…', rnd: b64u(crypto.getRandomValues(new Uint8Array(16))) };
     attempt = null; pairing = false; stopRelay();
     const sendPair = re => sendRaw({ t: 'pair', id: settings.myId, name: settings.name, rnd: conn.rnd, re: !!re });
     sendPair(false);
@@ -600,6 +613,7 @@ async function onWire(o) {
     case 'chunk': { const x = incoming[o.id]; if (!x) break; x.parts.push(o.d); if (x.parts.length >= x.meta.n) finishIncoming(o.id); break; }
     case 'ack': { const ms = await getMsgs(cid); const m = ms.find(m => m.id === o.id); if (m) { m.status = 'delivered'; saveMsgs(cid); if (curChat === cid) updateTick(m.id, 'delivered'); } break; }
     case 'rx': { const ms = await getMsgs(cid), m = ms.find(x => x.id === o.id); if (!m) break; m.rx = m.rx || {}; if (o.e) m.rx.them = String(o.e).slice(0, 8); else delete m.rx.them; saveMsgs(cid); if (curChat === cid) refreshBubble(m.id); if (o.e) buzz(15); break; }
+    case 'share': $('#rv').style.objectFit = o.on ? 'contain' : ''; if (o.on) toast('Friend is sharing their screen'); break;
     case 'cam': remoteCam = !!o.on; updateRemoteView(); break;
     case 'typing': if (curChat === cid) { $('#typing').textContent = 'typing…'; clearTimeout(typingTimer); typingTimer = setTimeout(() => $('#typing').textContent = '', 2500); } break;
     case 'del': { const ms = await getMsgs(cid), i = ms.findIndex(m => m.id === o.id); if (i >= 0) { ms.splice(i, 1); saveMsgs(cid); if (curChat === cid) renderMsgs(); } break; }
@@ -829,7 +843,30 @@ async function reach(cid) {
     else { attempt = { cid, pc: null, t: Date.now() }; updateStatus(); await postNote(k, 'k', {}); }
   } catch (e) { attempt = null; updateStatus(); toast('Cannot reach the connect server. Check your internet.'); }
 }
-setInterval(() => { if (KEY && curChat && !document.hidden && !isOn(curChat)) reach(curChat); }, 15000);
+let lastConn = null;
+setInterval(() => { const t = curChat || lastConn; if (KEY && t && (!document.hidden || kaOn) && !isOn(t)) reach(t); }, 15000);
+
+/* ---------- Stay connected in the background ----------
+   A web app is normally frozen by the phone soon after you leave it. Playing a silent sound (with the usual media
+   notification) tells Android the app is still in use, so the connection and calls keep running. */
+let kaEl = null, kaOn = false;
+function silentWav() {
+  const n = 8000, b = new Uint8Array(44 + n), v = new DataView(b.buffer), w = (o, t) => [...t].forEach((c, i) => b[o + i] = c.charCodeAt(0));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); w(36, 'data'); v.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) b[44 + i] = 128 + (i & 1);
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+function keepMeta() {
+  try { const ms = navigator.mediaSession; if (!ms || call) return; ms.metadata = new MediaMetadata({ title: 'SecureChat', artist: 'Connected · end-to-end encrypted' }); ms.playbackState = 'playing'; } catch {}
+}
+function keepAlive() {
+  if (!KEY || !UI.bg || !contacts.some(c => c.ps)) return stopKeepAlive();
+  if (!kaEl) { kaEl = new Audio(silentWav()); kaEl.loop = true; kaEl.volume = 0.05; kaEl.setAttribute('playsinline', ''); }
+  kaEl.play().then(() => { kaOn = true; keepMeta(); }).catch(() => { kaOn = false; });
+}
+function stopKeepAlive() { kaOn = false; try { kaEl && kaEl.pause(); } catch {} try { if (!call) { navigator.mediaSession.metadata = null; navigator.mediaSession.playbackState = 'none'; } } catch {} }
+document.addEventListener('pointerdown', () => { if (KEY && UI.bg && !kaOn) keepAlive(); }, { capture: true });
 
 /* ---------- Chat extras: reply, reactions, emoji ---------- */
 let replyTo = null, emojiOpen = false;
@@ -1074,7 +1111,7 @@ function sendCam() { const t = call && call.stream && call.stream.getVideoTracks
 function callSession(on) {
   try {
     const ms = navigator.mediaSession; if (!ms) return;
-    if (!on) { ms.metadata = null; ms.playbackState = 'none'; return; }
+    if (!on) { ms.metadata = null; ms.playbackState = 'none'; setTimeout(() => { if (kaOn) keepMeta(); }, 80); return; }
     ms.metadata = new MediaMetadata({ title: 'Call with ' + connName(), artist: 'SecureChat · encrypted' }); ms.playbackState = 'playing';
     for (const [a, f] of [['hangup', () => $('#bEnd').click()], ['togglemicrophone', () => $('#bMute').click()], ['togglecamera', () => $('#bCam').click()]]) { try { ms.setActionHandler(a, f); } catch {} }
   } catch {}
@@ -1136,7 +1173,7 @@ function endCallLocal() {
     try { call.senders.forEach(s => pc && pc.signalingState !== 'closed' && pc.removeTrack(s)); } catch {}
     call.stream && call.stream.getTracks().forEach(t => t.stop());
   }
-  callSession(false); remoteCam = true; $('#call').classList.remove('rin'); call = null; remoteStream = null; $('#rv').srcObject = null; $('#rv').style.visibility = 'hidden'; $('#lv').srcObject = null; callUI(false);
+  stopShare(true); $('#bShare').classList.remove('live'); $('#rv').style.objectFit = ''; callSession(false); remoteCam = true; $('#call').classList.remove('rin'); call = null; remoteStream = null; $('#rv').srcObject = null; $('#rv').style.visibility = 'hidden'; $('#lv').srcObject = null; callUI(false);
   try { wakeLock && wakeLock.release(); } catch {} wakeLock = null;
 }
 $('#bMute').onclick = () => {
@@ -1156,6 +1193,41 @@ $('#bCam').onclick = async () => {
   }
   t.enabled = !t.enabled; $('#bCam').classList.toggle('off', !t.enabled); $('#lv').classList.toggle('hidden', !t.enabled); $('#bCam').innerHTML = ic(t.enabled ? 'video' : 'videooff'); sendCam();
 };
+/* ---------- Screen sharing (with sound where the browser allows it) ---------- */
+(() => {
+  const st = document.createElement('style');
+  st.textContent = `#cbar{gap:12px}#cbar button{width:56px;height:56px}#call.rin #bShare,#call.mini #bShare{display:none!important}#bShare.live{background:var(--green)!important;color:#fff}`;
+  document.head.append(st);
+  const b = el('button', { id: 'bShare', title: 'Share screen', innerHTML: ic('screen') }); $('#bEnd').before(b);
+  b.onclick = () => (call && call.screen) ? stopShare() : startShare();
+})();
+async function startShare() {
+  if (!call || !call.answered || !pc) return toast('Share your screen after the call is connected');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return toast('This browser cannot share the screen. It works in Chrome on a computer.');
+  let ds;
+  try { ds = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: true }); } catch { return toast('Screen sharing was cancelled'); }
+  const vt = ds.getVideoTracks()[0], at = ds.getAudioTracks()[0], cam = call.stream && call.stream.getVideoTracks()[0];
+  const sender = cam && pc.getSenders().find(x => x.track === cam), added = [];
+  try {
+    if (sender) await sender.replaceTrack(vt); else { const s = pc.addTrack(vt, call.stream); added.push(s); }
+    if (at) added.push(pc.addTrack(at, call.stream));
+  } catch (e) { ds.getTracks().forEach(t => t.stop()); return toast('Could not start sharing'); }
+  call.screen = { vt, at, cam, sender, added }; call.senders.push(...added);
+  vt.onended = () => stopShare();
+  $('#bShare').classList.add('live'); $('#lv').srcObject = new MediaStream([vt]); $('#lv').style.transform = 'none'; $('#lv').classList.remove('hidden');
+  sendRaw({ t: 'share', on: true }); sendRaw({ t: 'cam', on: true });
+  toast(at ? 'Sharing your screen with sound' : 'Sharing your screen (no sound)');
+}
+function stopShare(quiet) {
+  const sc = call && call.screen; if (!sc) return; call.screen = null;
+  try { if (sc.sender && sc.cam && sc.cam.readyState === 'live') sc.sender.replaceTrack(sc.cam); } catch {}
+  sc.added.forEach(s => { try { pc && pc.signalingState !== 'closed' && pc.removeTrack(s); } catch {} call.senders = call.senders.filter(x => x !== s); });
+  sc.vt.onended = null; sc.vt.stop(); sc.at && sc.at.stop();
+  if (quiet) return;
+  $('#bShare').classList.remove('live'); $('#lv').srcObject = call.stream; $('#lv').style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
+  const hasCam = !!(sc.cam && sc.cam.enabled && sc.cam.readyState === 'live'); $('#lv').classList.toggle('hidden', !hasCam);
+  sendRaw({ t: 'share', on: false }); sendCam();
+}
 let facing = 'user', flipping = false;
 $('#bFlip').onclick = async () => {
   if (!call || !call.stream) return; const old = call.stream.getVideoTracks()[0]; if (!old) return;
@@ -1220,6 +1292,9 @@ setInterval(() => { if (KEY) purge(); }, 30000);
         } }))));
   });
 })();
+
+/* The keyboard should shrink the page (so the composer sits above it and the call window stays in view), not push it up */
+try { const mv = document.querySelector('meta[name=viewport]'); if (mv && !/interactive-widget/.test(mv.content)) mv.content += ',interactive-widget=resizes-content'; } catch {}
 
 /* ---------- boot ---------- */
 paintIcons();
